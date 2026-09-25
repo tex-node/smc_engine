@@ -83,6 +83,27 @@ class MT5Connector:
         print(f"[{datetime.now()}] Account Balance: ${balance:.2f} | Risk Target (1%): ${risk_amount:.2f} | Calculated Lots: {final_lots}")
         return final_lots
 
+    def has_active_position_or_order(self, magic_number: int = 202609) -> bool:
+        """
+        Checks if there are open positions or active pending limit orders 
+        belonging to this bot's magic number for the current symbol.
+        """
+        # 1. Check active pending orders
+        orders = mt5.orders_get(symbol=self.symbol)
+        if orders is not None:
+            for order in orders:
+                if order.magic == magic_number:
+                    return True
+
+        # 2. Check open positions
+        positions = mt5.positions_get(symbol=self.symbol)
+        if positions is not None:
+            for position in positions:
+                if position.magic == magic_number:
+                    return True
+
+        return False
+
     def place_limit_order(self, order_type: str, price: float, sl: float, tp: float):
         # Calculate dynamic volume before executing
         volume = self.calculate_dynamic_lot_size(entry_price=price, sl_price=sl)
@@ -250,12 +271,15 @@ def main():
                     # Layer 3: Execution & Order Placement
                     setup = engine.evaluate_execution(df_15m, csd_result)
                     if setup:
-                        connector.place_limit_order(
-                            order_type=setup['type'],
-                            price=setup['entry'],
-                            sl=setup['sl'],
-                            tp=setup['tp']
-                        )
+                        if not connector.has_active_position_or_order():
+                            connector.place_limit_order(
+                                order_type=setup['type'],
+                                price=setup['entry'],
+                                sl=setup['sl'],
+                                tp=setup['tp']
+                            )
+                        else:
+                            print(f"[{datetime.now()}] Active setup detected, but order/position already exists for magic 202609. Skipping duplicate placement.")
             
             time.sleep(POLL_INTERVAL_SECONDS)
 
