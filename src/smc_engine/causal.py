@@ -8,7 +8,7 @@ import pandas as pd
 
 from .execution_structure import execution_context, find_inducements, find_order_blocks
 from .models import Direction, LiquiditySide
-from .poi import DisplacementConfig, active_unmitigated_pois, detect_displacement, update_poi_lifecycle
+from .poi import DisplacementConfig, active_unmitigated_pois, detect_displacement
 from .setup import build_trade_setup, find_irl_target
 from .structure import build_liquidity_pools, confirm_csd, detect_structure_breaks, detect_sweeps, find_swings
 from .strategy import CandidateSetup, MultiTimeframeConfig
@@ -145,7 +145,9 @@ class CausalMTFAnalyzer:
                         context.direction,
                         swings_after,
                     )
-                    if irl is None or irl.candle_time > event_time:
+                    if irl is None:
+                        continue
+                    if pd.Timestamp(irl.candle_time) > pd.Timestamp(event_time):
                         continue
                     try:
                         setup = build_trade_setup(
@@ -154,10 +156,6 @@ class CausalMTFAnalyzer:
                         )
                     except ValueError:
                         continue
-                    if setup.created_time > context.order_block.candle_time:
-                        # CSD is the causal trigger; the setup becomes executable
-                        # only once the subsequent execution structure exists.
-                        pass
                     candidates.append(CausalCandidate(setup, event_time))
 
         return candidates
