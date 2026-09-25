@@ -35,12 +35,28 @@ def build_liquidity_pools(swings: list[SwingPoint]) -> list[LiquidityPool]:
         for s in swings
     ]
 
-def detect_sweeps(df: pd.DataFrame, liquidity: list[LiquidityPool], lookback_bars: int = 20) -> list[LiquiditySweep]:
-    """Detect wick-through and close-back sweeps of confirmed swings."""
+def detect_sweeps(
+    df: pd.DataFrame,
+    liquidity: list[LiquidityPool],
+    lookback_bars: int = 20,
+    swings: Optional[list[SwingPoint]] = None,
+) -> list[LiquiditySweep]:
+    """Detect wick-through/close-back sweeps of confirmed swings.
+
+    When ``swings`` is supplied, the source swing must be confirmed before the
+    sweep candle. Omitting it preserves compatibility with liquidity-only callers.
+    """
     sweeps: list[LiquiditySweep] = []
+    swing_by_id = {s.id: s for s in (swings or [])}
     for pool in liquidity:
+        source = swing_by_id.get(pool.source_swing_id)
+        if swings is not None:
+            if source is None or source.confirmation_index >= len(df):
+                continue
         source_idx = int(pool.source_swing_id.split("-")[-1])
-        start, end = source_idx + 1, min(len(df), source_idx + 1 + lookback_bars)
+        confirmation_index = source.confirmation_index if source is not None else source_idx
+        start = max(source_idx + 1, confirmation_index if swings is not None else source_idx + 1)
+        end = min(len(df), source_idx + 1 + lookback_bars)
         for i in range(start, end):
             row = df.iloc[i]
             if pool.side is LiquiditySide.SELL_SIDE and row["low"] < pool.price and row["close"] > pool.price:
