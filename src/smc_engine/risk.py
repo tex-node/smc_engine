@@ -121,7 +121,7 @@ class RiskEngine:
 
 def order_side(direction: Direction) -> str:
     """Return the MT5-independent side name for a directional setup."""
-    return "BUY" if direction is Direction.BULLISH else "SELL"
+    return "BUY_LIMIT" if direction is Direction.BULLISH else "SELL_LIMIT"
 
 
 def pending_price_is_valid(direction: Direction, entry: float, bid: float, ask: float) -> bool:
