@@ -140,6 +140,7 @@ class PersistentLifecycleCoordinator:
                 # MT5 position tickets are not guaranteed to equal the originating
                 # pending-order ticket. Identity/comment is the durable correlation
                 # key here; do not overwrite the persisted order ticket implicitly.
+                self.store.set_position_ticket(record.setup_id, record.ticket)
                 results.append(ReconciliationResult(
                     ReconciliationKind.BROKER_POSITION_RECOVERY_AVAILABLE,
                     record.setup_id, record.state, row["state"], record.ticket,
