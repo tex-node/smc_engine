@@ -57,13 +57,7 @@ class CausalMTFAnalyzer:
         h4_swings = find_swings(h4_view, self.config.h4_swing_left, self.config.h4_swing_right)
         swing_by_id = {s.id: s for s in h4_swings}
         liquidity = build_liquidity_pools(h4_swings)
-        sweeps = detect_sweeps(h4_view, liquidity, self.config.h4_sweep_lookback)
-        # A sweep cannot use a swing before that swing's right-side confirmation candle.
-        sweeps = [
-            s for s in sweeps
-            if swing_by_id.get(next((p.source_swing_id for p in liquidity if p.id == s.source_liquidity_id), ''), None) is not None
-            and swing_by_id[next(p.source_swing_id for p in liquidity if p.id == s.source_liquidity_id)].confirmation_index <= s.candle_index
-        ]
+        sweeps = detect_sweeps(h4_view, liquidity, self.config.h4_sweep_lookback, swings=h4_swings)
         breaks = detect_structure_breaks(h4_view, h4_swings)
 
         m15_work = detect_displacement(
