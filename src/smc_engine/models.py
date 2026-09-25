@@ -36,6 +36,8 @@ class SwingPoint:
     type: SwingType
     price: float
     strength: int
+    confirmation_index: int
+    confirmation_time: object
 
 @dataclass(frozen=True)
 class LiquidityPool:
