@@ -75,7 +75,7 @@ class MT5LifecycleReconciler:
     @staticmethod
     def setup_id_from_comment(comment: str) -> str | None:
         text = str(comment)
-        match = re.search(r"(?<!\\w)(SETUP-[^\\s]+)", text)
+        match = re.search(r"(?<!\w)(SETUP-[^\s]+)", text)
         return match.group(1) if match else None
 
     @classmethod
