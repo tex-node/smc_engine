@@ -1,4 +1,5 @@
 from pathlib import Path
+from dataclasses import replace
 from types import SimpleNamespace
 
 from src.smc_engine.lifecycle import SetupRegistry, SetupState
@@ -173,6 +174,7 @@ def test_submit_pending_persists_intent_before_broker_send(tmp_path: Path):
     registry.add(lifecycle)
     coordinator = PersistentLifecycleCoordinator(store, MT5LifecycleReconciler(mt5, 202609, registry), registry)
     spec = SymbolSpec("EURAUD", 5, 0.00001, 0.00001, 1.0, 0.01, 100, 0.01, 10, 0, 0)
+    lifecycle.setup = replace(lifecycle.setup, stop_loss=1.099)
     execution = MT5ExecutionAdapter(mt5, RiskEngine(spec))
 
     result = coordinator.submit_pending(lifecycle, execution, 1000, 1.099, 1.1003, "2026-01-01T00:03:00Z")
