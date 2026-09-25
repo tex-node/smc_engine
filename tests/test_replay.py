@@ -44,10 +44,10 @@ def test_pending_order_invalidates_before_fill():
     assert result.entry is None
 
 
-def test_same_candle_stop_and_target_resolves_to_stop():
+def test_same_candle_invalidation_wins_before_fill():
     x = candles([[1, 101, 103, 98, 101]])
     result = ReplayBroker(x).run(setup())
-    assert result.order_state is ReplayOrderState.STOPPED
+    assert result.order_state is ReplayOrderState.INVALIDATED
 
 
 def test_summary():
