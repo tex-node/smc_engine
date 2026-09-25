@@ -1,4 +1,5 @@
 from pathlib import Path
+import sqlite3
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -43,6 +44,75 @@ class FakeMT5:
     def order_send(self, request):
         self.orders.append(SimpleNamespace(ticket=123, magic=request["magic"], comment=request["comment"]))
         return {"retcode": self.TRADE_RETCODE_PLACED, "order": 123}
+
+
+def test_store_migrates_v2_schema_without_losing_setup(tmp_path: Path):
+    db_path = tmp_path / "state.sqlite3"
+    payload = {
+        "id": "SETUP-EURAUD-1-OB",
+        "symbol": "EURAUD",
+        "direction": "BULLISH",
+        "created_time": "2026-01-01T00:00:00Z",
+        "poi_id": "P",
+        "sweep_id": "S",
+        "csd_id": "C",
+        "protected_level": 1.0,
+        "order_block_id": "OB",
+        "inducement_id": "IDM",
+        "entry": 1.1,
+        "stop_loss": 0.99,
+        "take_profit": 1.2,
+        "irl_swing_id": "IRL",
+        "invalidation_level": 1.0,
+        "risk_percent": 1.0,
+    }
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO schema_meta(key, value) VALUES ('schema_version', '2');
+            CREATE TABLE setups (
+                setup_id TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                state TEXT NOT NULL,
+                created_time TEXT NOT NULL,
+                updated_time TEXT NOT NULL,
+                ticket INTEGER,
+                setup_json TEXT NOT NULL,
+                reason TEXT
+            );
+            CREATE TABLE lifecycle_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                setup_id TEXT NOT NULL,
+                from_state TEXT NOT NULL,
+                to_state TEXT NOT NULL,
+                event_time TEXT NOT NULL,
+                reason TEXT NOT NULL
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO setups(setup_id,symbol,state,created_time,updated_time,ticket,setup_json,reason) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("SETUP-EURAUD-1-OB", "EURAUD", "ORDER_PLACED", payload["created_time"],
+             "2026-01-01T00:01:00Z", 11, __import__("json").dumps(payload), "legacy"),
+        )
+        conn.commit()
+
+    store = SetupStore(db_path)
+    row = store.get("SETUP-EURAUD-1-OB")
+    assert row is not None
+    assert row["ticket"] == 11
+    assert row["position_ticket"] is None
+    assert row["state"] is SetupState.ORDER_PLACED
+    assert row["setup_json"]["id"] == "SETUP-EURAUD-1-OB"
+    version = store._conn.execute(
+        "SELECT value FROM schema_meta WHERE key='schema_version'"
+    ).fetchone()[0]
+    assert version == "3"
+    columns = {r[1] for r in store._conn.execute("PRAGMA table_info(setups)").fetchall()}
+    assert "position_ticket" in columns
+    store.close()
 
 
 def test_startup_reconcile_classifies_broker_only_state(tmp_path: Path):
