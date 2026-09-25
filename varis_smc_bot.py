@@ -6,11 +6,12 @@ from datetime import datetime
 from typing import Dict, Optional
 
 # ==========================================
-# 1. MT5 CONNECTOR CLASS
+# 1. MT5 CONNECTOR CLASS WITH RISK MANAGEMENT
 # ==========================================
 class MT5Connector:
-    def __init__(self, symbol: str = "EURAUD"):
+    def __init__(self, symbol: str = "EURAUD", risk_percent: float = 1.0):
         self.symbol = symbol
+        self.risk_percent = risk_percent
 
     def initialize(self) -> bool:
         if not mt5.initialize():
@@ -21,7 +22,7 @@ class MT5Connector:
             print(f"[{datetime.now()}] Failed to select {self.symbol} in Market Watch.")
             return False
             
-        print(f"[{datetime.now()}] Successfully connected to MT5 Terminal for {self.symbol}")
+        print(f"[{datetime.now()}] Connected to MT5 Terminal for {self.symbol} | Risk: {self.risk_percent}% per trade")
         return True
 
     def get_rates(self, timeframe, count: int = 100) -> pd.DataFrame:
@@ -33,7 +34,59 @@ class MT5Connector:
         df['time'] = pd.to_datetime(df['time'], unit='s')
         return df[['time', 'open', 'high', 'low', 'close', 'tick_volume']]
 
-    def place_limit_order(self, order_type: str, price: float, sl: float, tp: float, volume: float = 0.1):
+    def calculate_dynamic_lot_size(self, entry_price: float, sl_price: float) -> float:
+        """
+        Calculates exact lot size corresponding to 1% account risk based on SL distance.
+        Normalized to broker's volume step, min volume, and max volume limits.
+        """
+        account_info = mt5.account_info()
+        symbol_info = mt5.symbol_info(self.symbol)
+        
+        if account_info is None or symbol_info is None:
+            print(f"[{datetime.now()}] Error fetching account/symbol info for lot calculation.")
+            return 0.01
+
+        # Account balance & monetary risk target
+        balance = account_info.balance
+        risk_amount = balance * (self.risk_percent / 100.0)
+
+        # Calculate SL distance in price terms
+        sl_distance = abs(entry_price - sl_price)
+        if sl_distance == 0:
+            return symbol_info.volume_min
+
+        # Symbol specifications
+        tick_size = symbol_info.trade_tick_size
+        tick_value = symbol_info.trade_tick_value
+        volume_step = symbol_info.volume_step
+        min_vol = symbol_info.volume_min
+        max_vol = symbol_info.volume_max
+
+        if tick_size == 0 or tick_value == 0:
+            return min_vol
+
+        # Risk formula: Risk = Lots * (SL Distance / Tick Size) * Tick Value
+        loss_per_lot = (sl_distance / tick_size) * tick_value
+        if loss_per_lot == 0:
+            return min_vol
+
+        raw_lots = risk_amount / loss_per_lot
+
+        # Round down to nearest volume step (e.g. 0.01)
+        step_precision = len(str(volume_step).split('.')[1]) if '.' in str(volume_step) else 0
+        calculated_lots = math.floor(raw_lots / volume_step) * volume_step
+        calculated_lots = round(calculated_lots, step_precision)
+
+        # Clamp between broker min and max
+        final_lots = max(min_vol, min(max_vol, calculated_lots))
+        
+        print(f"[{datetime.now()}] Account Balance: ${balance:.2f} | Risk Target (1%): ${risk_amount:.2f} | Calculated Lots: {final_lots}")
+        return final_lots
+
+    def place_limit_order(self, order_type: str, price: float, sl: float, tp: float):
+        # Calculate dynamic volume before executing
+        volume = self.calculate_dynamic_lot_size(entry_price=price, sl_price=sl)
+        
         type_flag = mt5.ORDER_TYPE_BUY_LIMIT if order_type == "BUY_LIMIT" else mt5.ORDER_TYPE_SELL_LIMIT
         
         request = {
@@ -46,7 +99,7 @@ class MT5Connector:
             "tp": round(tp, 5),
             "deviation": 10,
             "magic": 202609,
-            "comment": "Varis SMC Bot",
+            "comment": f"Varis SMC Bot ({self.risk_percent}% Risk)",
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": mt5.ORDER_FILLING_IOC,
         }
@@ -55,10 +108,13 @@ class MT5Connector:
         if result.retcode != mt5.TRADE_RETCODE_DONE:
             print(f"[{datetime.now()}] Order Placement Failed! Code: {result.retcode}, Comment: {result.comment}")
         else:
-            print(f"[{datetime.now()}] PENDING ORDER PLACED! Ticket: {result.order} | Type: {order_type} | Price: {price} | SL: {sl} | TP: {tp}")
+            print(f"[{datetime.now()}] PENDING ORDER PLACED! Ticket: {result.order} | Type: {order_type} | Volume: {volume} Lots | Entry: {price} | SL: {sl} | TP: {tp}")
 
     def shutdown(self):
         mt5.shutdown()
+
+# Import math module required for floor calculation
+import math
 
 # ==========================================
 # 2. VARIS SMC ENGINE CLASS
@@ -156,10 +212,10 @@ class VarisSMCEngine:
 # ==========================================
 def main():
     SYMBOL = "EURAUD"
-    LOT_SIZE = 0.1
-    POLL_INTERVAL_SECONDS = 60 # Check every minute
+    RISK_PERCENT = 1.0  # 1% account risk per trade
+    POLL_INTERVAL_SECONDS = 60
 
-    connector = MT5Connector(symbol=SYMBOL)
+    connector = MT5Connector(symbol=SYMBOL, risk_percent=RISK_PERCENT)
     engine = VarisSMCEngine()
 
     if not connector.initialize():
@@ -198,8 +254,7 @@ def main():
                             order_type=setup['type'],
                             price=setup['entry'],
                             sl=setup['sl'],
-                            tp=setup['tp'],
-                            volume=LOT_SIZE
+                            tp=setup['tp']
                         )
             
             time.sleep(POLL_INTERVAL_SECONDS)

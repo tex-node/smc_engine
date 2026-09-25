@@ -15,11 +15,16 @@ The pipeline is a strict 3-layer confluence model. No layer is traded in isolati
 |-------|-----------|---------|
 | 1. Macro Context | Daily (60–90 day window) | Unmitigated Demand/Supply zones created by displacement candles (body > 1.5x ATR-14). Price must be touching/sweeping an HTF POI. |
 | 2. Reversal & CSD | 4-Hour | Liquidity sweep detection (wick through a prior swing, close back inside) + Change in State of Delivery (full body close beyond the sweep impulse point). Sweep extreme = Protected High/Low. |
-| 3. Execution | 15-Minute | Inducement (IDM) at/near the 15m Order Block. Limit order at OB mitigation; SL beyond Protected High/Low; TP at Internal Range Liquidity (IRL). |
+| 3. Execution | 15-Minute | Inducement (IDM) at/near the 15m Order Block. Lot size computed from 1% account risk using broker tick value/size and volume steps; limit order at OB mitigation; SL beyond Protected High/Low; TP at Internal Range Liquidity (IRL). |
+
+Position sizing formula (in `calculate_dynamic_lot_size()`):
+`Lots = (Balance × Risk%) ÷ (|Entry − SL| / TickSize × TickValue)`, floored to the broker
+`volume_step` and clamped between `volume_min` and `volume_max`. A tight SL therefore
+scales volume up and a wide SL scales it down — monetary risk stays fixed at 1%.
 
 Execution rules:
 - Pending limit orders only — never market orders.
-- SL and TP are attached at order placement time.
+- SL, TP, and dynamic lot size are attached at order placement time.
 - Continuous monitoring loop on closed 15m candles (poll interval configurable).
 
 ## Repository Layout
@@ -63,7 +68,7 @@ Defaults are set at the top of `main()` in `varis_smc_bot.py`:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `SYMBOL` | `EURAUD` | Traded instrument |
-| `LOT_SIZE` | `0.1` | Pending order volume |
+| `RISK_PERCENT` | `1.0` | Percent of account balance risked per trade (drives dynamic lot size) |
 | `POLL_INTERVAL_SECONDS` | `60` | Scanner loop interval |
 | `atr_period` | `14` | ATR period for displacement filter |
 | `displacement_mult` | `1.5` | Candle body multiple of ATR to qualify as displacement |

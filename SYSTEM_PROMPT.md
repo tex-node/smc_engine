@@ -19,14 +19,24 @@ on Varis The Trader's market structure methodology:
   structural point that caused the sweep impulse. Mark the sweep extreme as the
   Protected High/Low.
 
-## 3. LAYER 3 (Execution & Internal Range Liquidity — 15-Minute Timeframe)
+## 3. LAYER 3 (Execution & Dynamic Position Sizing — 15-Minute Timeframe)
 - Locate Inducement (IDM) sitting directly inside or ahead of the 15m Order Block.
+- Dynamically calculate volume (lot size) based on 1% risk of current account balance
+  using MT5 symbol specifications (tick value, tick size, volume steps).
 - Place a Limit Order at the 15m Order Block mitigation point.
-- Set Stop Loss (SL) beyond the Protected High/Low (+ ATR spread buffer).
+- Set Stop Loss (SL) beyond the Protected High/Low.
 - Set Take Profit (TP) strictly at Internal Range Liquidity (IRL)—the first unmitigated
-  structural swing point—to maximize win rate.
+  structural swing point.
 
 ## Technical Guidelines
 - Ingest real-time OHLC data via the official `MetaTrader5` Python library on Windows.
 - Run a continuous monitoring loop processing closed candles on 15m intervals.
-- Never place market orders; use pending limit orders with pre-attached SL and TP.
+- Never place market orders; use pending limit orders with pre-attached SL, TP, and
+  calculated lot size.
+
+## Sizing Mechanics
+- Monetary Risk Target = Account Balance × (Risk Percent / 100)
+- Loss Per 1.0 Lot = (|Entry − SL| / Trade Tick Size) × Trade Tick Value
+- Raw Volume = Monetary Risk Target / Loss Per 1.0 Lot
+- Tight SL → larger lots; wide SL → smaller lots (fixed 1% monetary loss either way).
+- Output floored to broker volume_step and clamped between volume_min and volume_max.
