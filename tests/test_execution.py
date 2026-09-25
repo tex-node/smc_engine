@@ -1,4 +1,3 @@
-
 from src.smc_engine.execution import MT5ExecutionAdapter, PendingOrderRequest
 from src.smc_engine.models import Direction
 from src.smc_engine.risk import RiskEngine
@@ -28,10 +27,10 @@ class FakeMT5:
 def make_setup():
     return TradeSetup(
         id="S", symbol="TEST", direction=Direction.BULLISH, created_time=1,
-        poi_id="P", sweep_id="SW", csd_id="CSD", protected_level=1.0,
+        poi_id="P", sweep_id="SW", csd_id="CSD", protected_level=1.099,
         order_block_id="OB", inducement_id="IDM", entry=1.1,
-        stop_loss=1.0, take_profit=1.2, irl_swing_id="IRL",
-        invalidation_level=1.0, risk_percent=1.0,
+        stop_loss=1.099, take_profit=1.2, irl_swing_id="IRL",
+        invalidation_level=1.099, risk_percent=1.0,
     )
 
 
