@@ -20,6 +20,7 @@ def test_valid_order_lifecycle():
     x = SetupLifecycle(make_setup())
     x.transition(SetupState.ORDER_PREPARED)
     x.transition(SetupState.ORDER_PREFLIGHTED)
+    x.transition(SetupState.ORDER_SUBMITTING)
     x.transition(SetupState.ORDER_PLACED)
     x.transition(SetupState.FILLED)
     x.transition(SetupState.POSITION_MANAGED)
