@@ -14,14 +14,12 @@ def build_fixture():
     base = pd.Timestamp("2026-01-01", tz="UTC")
     # The fixture is deliberately constructed as a deterministic integration
     # specimen. It is not intended to model market statistics.
-    d1 = frame([
-        [base + pd.Timedelta(days=i) for i in range(20)]
-    ])
+    d1 = frame([[base + pd.Timedelta(days=i), 100, 101, 99, 100] for i in range(20)])
     # Force a bullish D1 displacement with a large body.
     d1.loc[14, ["open","high","low","close"]] = [100, 110, 99, 109]
     d1.loc[15, ["open","high","low","close"]] = [109, 110, 107, 108]
 
-    h4_rows = [[base + pd.Timedelta(hours=4*i) for i in range(30)]]
+    h4_rows = [[base + pd.Timedelta(hours=4*i), 100, 101, 99, 100] for i in range(30)]
     # Confirmed sell-side swing low.
     h4_rows[10] = [base + pd.Timedelta(hours=40), 100, 101, 95, 99]
     h4_rows[11] = [base + pd.Timedelta(hours=44), 99, 100, 97, 98]
@@ -32,7 +30,7 @@ def build_fixture():
     h4_rows[16] = [base + pd.Timedelta(hours=64), 99, 104, 98, 103]
     h4 = frame(h4_rows)
 
-    m15_rows = [[base + pd.Timedelta(minutes=15*i) for i in range(100)]]
+    m15_rows = [[base + pd.Timedelta(minutes=15*i), 100, 101, 99, 100] for i in range(100)]
     # Post-CSD bearish candle becomes bullish OB.
     m15_rows[60] = [base + pd.Timedelta(minutes=900), 100, 101, 98, 99]
     # Displacement.
@@ -64,8 +62,9 @@ def test_end_to_end_fixture_produces_or_rejects_candidate_deterministically():
         m15_idm_window=12,
     )
     analyzer = CausalMTFAnalyzer("TEST", cfg)
-    first = analyzer.analyze_at(d1, h4, m15, as_of=base + pd.Timedelta(minutes=1485))
-    second = analyzer.analyze_at(d1, h4, m15, as_of="M99")
+    as_of = m15["time"].iloc[-1]
+    first = analyzer.analyze_at(d1, h4, m15, as_of=as_of)
+    second = analyzer.analyze_at(d1, h4, m15, as_of=as_of)
     assert first == second
 
 
@@ -75,7 +74,7 @@ def test_replay_can_consume_a_manually_constructed_setup():
     # end-to-end execution contract independently.
     candidates = []
     analyzer = CausalMTFAnalyzer("TEST")
-    candidates.extend(analyzer.analyze_at(d1, h4, m15, as_of="M99"))
+    candidates.extend(analyzer.analyze_at(d1, h4, m15, as_of=m15["time"].iloc[-1]))
 
     for candidate in candidates:
         result = ReplayBroker(m15).run(candidate.setup)
