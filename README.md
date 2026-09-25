@@ -245,3 +245,12 @@ Added `src/smc_engine/causal.py` and `tests/test_causal.py`.
 The strategy can now be evaluated at a specific historical `as_of` timestamp. Each timeframe is truncated to the latest candle available at that timestamp, and M15 execution structures are evaluated only after the H4 CSD timestamp.
 
 This prevents look-ahead contamination when historical D1/H4/M15 data is combined.
+
+
+### Phase 12 — End-to-end integration fixture
+
+Added `tests/test_integration_fixture.py`.
+
+The test suite now contains a multi-timeframe synthetic market specimen covering the intended causal sequence from D1 displacement through H4 sweep/CSD and post-CSD M15 execution structure, plus replay consumption of any resulting candidate.
+
+The fixture is an engineering regression specimen, not market-performance evidence.
