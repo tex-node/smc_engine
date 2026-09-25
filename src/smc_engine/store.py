@@ -72,7 +72,7 @@ class SetupStore:
     def _setup_payload(self, setup: TradeSetup) -> str:
         return json.dumps(asdict(setup), default=self._json_default, sort_keys=True)
 
-    def _upsert_setup_no_commit(self, setup, state, updated_time, ticket=None, reason=None):
+    def _upsert_setup_no_commit(self, setup, state, updated_time, ticket=None, reason=None, position_ticket=None):
         self._conn.execute(
             """INSERT INTO setups
               (setup_id,symbol,state,created_time,updated_time,ticket,setup_json,reason)
@@ -81,6 +81,7 @@ class SetupStore:
               state=excluded.state,
               updated_time=excluded.updated_time,
               ticket=COALESCE(excluded.ticket,setups.ticket),
+              position_ticket=COALESCE(excluded.position_ticket,setups.position_ticket),
               setup_json=excluded.setup_json,
               reason=excluded.reason""",
             (setup.id, setup.symbol, state.value, str(setup.created_time),
@@ -100,10 +101,10 @@ class SetupStore:
                 (setup_id, from_state.value, to_state.value, str(event_time), reason),
             )
 
-    def persist_transition(self, setup, from_state, to_state, event_time, reason, ticket=None):
-        """Atomically persist the new setup state and its transition event."""
+    def persist_transition(self, setup, from_state, to_state, event_time, reason, ticket=None, position_ticket=None):
+        """Atomically persist the new setup state, broker identity, and transition event."""
         with self._conn:
-            self._upsert_setup_no_commit(setup, to_state, event_time, ticket, reason)
+            self._upsert_setup_no_commit(setup, to_state, event_time, ticket, reason, position_ticket=position_ticket)
             self._conn.execute(
                 """INSERT INTO lifecycle_events
                    (setup_id,from_state,to_state,event_time,reason)
