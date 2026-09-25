@@ -59,7 +59,7 @@ class RiskEngine:
         if entry == stop_loss:
             raise ValueError("entry and stop_loss cannot be equal")
         risk_money = Decimal(str(balance)) * Decimal(str(risk_percent)) / Decimal("100")
-        loss_per_lot = Decimal(str(self._loss_per_lot(entry, stop_loss)))
+        loss_per_lot = self._loss_per_lot_decimal(entry, stop_loss)
         if loss_per_lot <= 0:
             raise ValueError("calculated loss per lot must be positive")
 
