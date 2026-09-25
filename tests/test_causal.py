@@ -33,3 +33,18 @@ def test_causal_analyzer_does_not_use_future_data():
     late = analyzer.analyze_at(d1, h4, m15, as_of=m15_times[800])
     assert isinstance(early, list)
     assert isinstance(late, list)
+
+
+def test_candidates_never_reference_data_after_as_of():
+    times = pd.date_range("2026-01-01", periods=40, freq="D", tz="UTC")
+    d1 = make(times)
+    h4_times = pd.date_range("2026-01-01", periods=240, freq="4h", tz="UTC")
+    h4 = make(h4_times)
+    m15_times = pd.date_range("2026-01-01", periods=960, freq="15min", tz="UTC")
+    m15 = make(m15_times)
+    analyzer = CausalMTFAnalyzer("TEST", MultiTimeframeConfig())
+    cutoff = m15_times[500]
+    candidates = analyzer.analyze_at(d1, h4, m15, as_of=cutoff)
+    for candidate in candidates:
+        assert pd.Timestamp(candidate.setup_time) <= cutoff
+        assert pd.Timestamp(candidate.setup.created_time) <= cutoff
