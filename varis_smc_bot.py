@@ -104,6 +104,41 @@ class MT5Connector:
 
         return False
 
+    def cancel_order(self, ticket: int) -> bool:
+        """Cancels a pending order by ticket ID."""
+        request = {
+            "action": mt5.TRADE_ACTION_REMOVE,
+            "order": ticket,
+        }
+        result = mt5.order_send(request)
+        if result.retcode == mt5.TRADE_RETCODE_DONE:
+            print(f"[{datetime.now()}] CANCELED PENDING ORDER #{ticket} due to structural invalidation.")
+            return True
+        else:
+            print(f"[{datetime.now()}] Failed to cancel order #{ticket}. Retcode: {result.retcode}")
+            return False
+
+    def manage_pending_order_invalidation(self, current_price: float, magic_number: int = 202609):
+        """
+        Scans open pending orders. If market price breaches the Stop Loss / Protected Level 
+        BEFORE hitting the Limit Order entry price, cancel the order immediately.
+        """
+        orders = mt5.orders_get(symbol=self.symbol)
+        if orders is None or len(orders) == 0:
+            return
+
+        for order in orders:
+            if order.magic == magic_number:
+                # BUY LIMIT INVALIDATION: Current price drops BELOW Stop Loss (Protected Low)
+                if order.type == mt5.ORDER_TYPE_BUY_LIMIT and current_price <= order.sl:
+                    print(f"[{datetime.now()}] Invalidation triggered! Price ({current_price}) dropped below Protected Low ({order.sl}).")
+                    self.cancel_order(order.ticket)
+
+                # SELL LIMIT INVALIDATION: Current price rises ABOVE Stop Loss (Protected High)
+                elif order.type == mt5.ORDER_TYPE_SELL_LIMIT and current_price >= order.sl:
+                    print(f"[{datetime.now()}] Invalidation triggered! Price ({current_price}) rose above Protected High ({order.sl}).")
+                    self.cancel_order(order.ticket)
+
     def place_limit_order(self, order_type: str, price: float, sl: float, tp: float):
         # Calculate dynamic volume before executing
         volume = self.calculate_dynamic_lot_size(entry_price=price, sl_price=sl)
@@ -235,6 +270,7 @@ def main():
     SYMBOL = "EURAUD"
     RISK_PERCENT = 1.0  # 1% account risk per trade
     POLL_INTERVAL_SECONDS = 60
+    MAGIC_NUMBER = 202609
 
     connector = MT5Connector(symbol=SYMBOL, risk_percent=RISK_PERCENT)
     engine = VarisSMCEngine()
@@ -251,7 +287,12 @@ def main():
             df_4h    = connector.get_rates(mt5.TIMEFRAME_H4, count=100)
             df_15m   = connector.get_rates(mt5.TIMEFRAME_M15, count=100)
 
-            # Layer 1: Macro Context
+            current_close = df_15m['close'].iloc[-1]
+
+            # 1. First, check and manage existing pending orders for invalidation
+            connector.manage_pending_order_invalidation(current_price=current_close, magic_number=MAGIC_NUMBER)
+
+            # 2. Check Layer 1: Macro Context
             context = engine.check_macro_context(df_daily)
             
             bias = None
@@ -261,17 +302,15 @@ def main():
                 bias = "BEARISH"
 
             if bias:
-                print(f"[{datetime.now()}] HTF Context Active: {bias} Bias detected.")
-                
-                # Layer 2: Reversal & CSD
+                # Check Layer 2: Reversal & CSD
                 csd_result = engine.check_reversal_csd(df_4h, bias)
                 if csd_result:
-                    print(f"[{datetime.now()}] 4H CSD Confirmed! Protected Level: {csd_result['protected_level']}")
                     
-                    # Layer 3: Execution & Order Placement
+                    # Check Layer 3: Execution Setup
                     setup = engine.evaluate_execution(df_15m, csd_result)
                     if setup:
-                        if not connector.has_active_position_or_order():
+                        # DEDUPLICATION GUARD: Only place if no active position or pending order exists
+                        if not connector.has_active_position_or_order(magic_number=MAGIC_NUMBER):
                             connector.place_limit_order(
                                 order_type=setup['type'],
                                 price=setup['entry'],
@@ -279,7 +318,7 @@ def main():
                                 tp=setup['tp']
                             )
                         else:
-                            print(f"[{datetime.now()}] Active setup detected, but order/position already exists for magic 202609. Skipping duplicate placement.")
+                            print(f"[{datetime.now()}] Setup active, but an order/position is already open. Skipping duplicate.")
             
             time.sleep(POLL_INTERVAL_SECONDS)
 

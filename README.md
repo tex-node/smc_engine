@@ -25,6 +25,11 @@ scales volume up and a wide SL scales it down — monetary risk stays fixed at 1
 Execution rules:
 - Pending limit orders only — never market orders.
 - SL, TP, and dynamic lot size are attached at order placement time.
+- Deduplication: no new order while a bot-owned (magic 202609) pending order or
+  position exists on the symbol.
+- Structural invalidation: each poll checks the 15m close against pending orders' SL;
+  if price breaches the Protected High/Low before the limit is filled, the order is
+  canceled (`manage_pending_order_invalidation` / `cancel_order`).
 - Continuous monitoring loop on closed 15m candles (poll interval configurable).
 
 ## Repository Layout
