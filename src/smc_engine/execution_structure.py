@@ -45,7 +45,15 @@ def find_order_blocks(df: pd.DataFrame, displacement_indices: list[int], timefra
     for d in displacement_indices:
         if d <= 0 or d >= len(df):
             continue
-        direction = Direction.BULLISH if df.iloc[d]['close'] > df.iloc[d]['open'] else Direction.BEARISH
+        row = df.iloc[d]
+        direction = Direction.BULLISH if row['close'] > row['open'] else Direction.BEARISH
+        # When displacement annotations are present, only accept indices that
+        # are actually displacement candles. This prevents direct callers from
+        # accidentally treating an arbitrary directional candle as the source.
+        if 'displacement_bullish' in df.columns and 'displacement_bearish' in df.columns:
+            is_displacement = bool(row['displacement_bullish'] if direction is Direction.BULLISH else row['displacement_bearish'])
+            if not is_displacement:
+                continue
         source = _opposite_candle(df, d, direction, search_back)
         if source is None:
             continue
