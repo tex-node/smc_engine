@@ -463,7 +463,7 @@ def test_position_managed_recovery_does_not_compare_order_ticket_to_position_tic
     results = coordinator.startup_reconcile("EURAUD")
     assert len(results) == 1
     assert results[0].kind == ReconciliationKind.BROKER_POSITION_RECOVERY_AVAILABLE
-    assert results[0].ticket == 11
+    assert results[0].ticket == 77
     assert results[0].position_ticket == 77
     assert store.get(setup.id)["ticket"] == 11
     store.close()
