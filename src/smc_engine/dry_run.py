@@ -38,6 +38,7 @@ class DryRunEngine:
         analyzer: MT5Analyzer,
         risk: RiskEngine,
         execution: Optional[MT5ExecutionAdapter] = None,
+        order_guard: Optional[MT5OrderGuard] = None,
     ):
         self.market = market
         self.analyzer = analyzer
