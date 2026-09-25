@@ -7,6 +7,7 @@ from src.smc_engine.polling import LivePollingCoordinator
 
 class FakeMarket:
     def __init__(self):
+        self.symbol = "EURAUD"
         self.times = [
             pd.Timestamp("2026-01-01T10:00:00Z"),
             pd.Timestamp("2026-01-01T10:00:00Z"),
