@@ -47,6 +47,7 @@ class ReconciliationKind:
     PERSISTED_MISSING_BROKER = "PERSISTED_MISSING_BROKER"
     STATE_MISMATCH = "STATE_MISMATCH"
     SUBMISSION_CONFIRMED = "SUBMISSION_CONFIRMED"
+    BROKER_IDENTITY_CONFLICT = "BROKER_IDENTITY_CONFLICT"
 
 
 @dataclass(frozen=True)
@@ -90,6 +91,20 @@ class PersistentLifecycleCoordinator:
         persisted = {row["setup_id"]: row for row in self.store.active(symbol)}
 
         results: list[ReconciliationResult] = []
+        records_by_setup: dict[str, list[Any]] = {}
+        for record in broker_records:
+            records_by_setup.setdefault(record.setup_id, []).append(record)
+
+        for setup_id, records in records_by_setup.items():
+            if len(records) > 1:
+                results.append(ReconciliationResult(
+                    ReconciliationKind.BROKER_IDENTITY_CONFLICT,
+                    setup_id,
+                    None,
+                    persisted.get(setup_id, {}).get("state"),
+                    None,
+                ))
+
         for record in broker_records:
             row = persisted.get(record.setup_id)
             if row is None:
@@ -100,9 +115,12 @@ class PersistentLifecycleCoordinator:
             elif row["state"] is SetupState.ORDER_SUBMITTING and record.state is SetupState.ORDER_PLACED:
                 lifecycle = self.registry.get(record.setup_id)
                 if lifecycle is not None:
-                    previous = lifecycle.state
-                    lifecycle.transition(SetupState.ORDER_PLACED, "startup reconciliation confirmed broker submission")
-                    self.store.persist_transition(lifecycle.setup, previous, SetupState.ORDER_PLACED, row["updated_time"], "startup reconciliation confirmed broker submission", ticket=record.ticket)
+                    PersistentLifecycle(lifecycle, self.store).transition(
+                        SetupState.ORDER_PLACED,
+                        row["updated_time"],
+                        "startup reconciliation confirmed broker submission",
+                        ticket=record.ticket,
+                    )
                 results.append(ReconciliationResult(ReconciliationKind.SUBMISSION_CONFIRMED, record.setup_id, record.state, row["state"], record.ticket))
             elif row["state"] is record.state:
                 results.append(ReconciliationResult(
@@ -161,9 +179,19 @@ class PersistentLifecycleCoordinator:
             ticket = broker_result.get("order") or broker_result.get("ticket")
         else:
             ticket = getattr(broker_result, "order", None) or getattr(broker_result, "ticket", None)
-        PersistentLifecycle(lifecycle, self.store).transition(SetupState.ORDER_PLACED, event_time, "broker accepted pending order")
-        self.store.upsert_setup(lifecycle.setup, lifecycle.state, event_time, ticket=ticket, reason=lifecycle.reason)
-        return SubmissionResult(SetupState.ORDER_PLACED, broker_result=broker_result, ticket=ticket)
+        if ticket is None:
+            return SubmissionResult(
+                SetupState.ORDER_SUBMITTING,
+                broker_result=broker_result,
+                ambiguous=True,
+            )
+        PersistentLifecycle(lifecycle, self.store).transition(
+            SetupState.ORDER_PLACED,
+            event_time,
+            "broker accepted pending order",
+            ticket=int(ticket),
+        )
+        return SubmissionResult(SetupState.ORDER_PLACED, broker_result=broker_result, ticket=int(ticket))
 
     def can_accept_new_setup(self, symbol: str) -> bool:
         broker_ids = self.reconciler.active_setup_ids(symbol)
