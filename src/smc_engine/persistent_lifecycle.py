@@ -34,6 +34,22 @@ class PersistentLifecycle:
         )
 
 
+class ReconciliationKind:
+    BROKER_ACTIVE_MATCH = "BROKER_ACTIVE_MATCH"
+    BROKER_ACTIVE_UNKNOWN = "BROKER_ACTIVE_UNKNOWN"
+    PERSISTED_MISSING_BROKER = "PERSISTED_MISSING_BROKER"
+    STATE_MISMATCH = "STATE_MISMATCH"
+
+
+@dataclass(frozen=True)
+class ReconciliationResult:
+    kind: str
+    setup_id: str
+    broker_state: Optional[SetupState] = None
+    persisted_state: Optional[SetupState] = None
+    ticket: Optional[int] = None
+
+
 class PersistentLifecycleCoordinator:
     """Startup/restart boundary joining SQLite strategy state and MT5 truth."""
 
@@ -47,21 +63,36 @@ class PersistentLifecycleCoordinator:
         self.reconciler = reconciler
         self.registry = registry
 
-    def startup_reconcile(self, symbol: str) -> set[str]:
+    def startup_reconcile(self, symbol: str) -> list[ReconciliationResult]:
         broker_records = self.reconciler.reconcile(symbol)
         broker_ids = {record.setup_id for record in broker_records}
         persisted = {row["setup_id"]: row for row in self.store.active(symbol)}
 
-        # Broker execution state wins for identities that were actually submitted.
-        # Persisted strategy state is retained for setups that have not reached MT5.
+        results: list[ReconciliationResult] = []
         for record in broker_records:
             row = persisted.get(record.setup_id)
-            if row is not None and row["state"] is not record.state:
-                # Do not manufacture a TradeSetup here; update only after the
-                # original setup has been loaded by the caller.
-                continue
-
-        return broker_ids
+            if row is None:
+                results.append(ReconciliationResult(
+                    ReconciliationKind.BROKER_ACTIVE_UNKNOWN,
+                    record.setup_id, record.state, None, record.ticket,
+                ))
+            elif row["state"] is record.state:
+                results.append(ReconciliationResult(
+                    ReconciliationKind.BROKER_ACTIVE_MATCH,
+                    record.setup_id, record.state, row["state"], record.ticket,
+                ))
+            else:
+                results.append(ReconciliationResult(
+                    ReconciliationKind.STATE_MISMATCH,
+                    record.setup_id, record.state, row["state"], record.ticket,
+                ))
+        for setup_id, row in persisted.items():
+            if setup_id not in broker_ids:
+                results.append(ReconciliationResult(
+                    ReconciliationKind.PERSISTED_MISSING_BROKER,
+                    setup_id, None, row["state"], row["ticket"],
+                ))
+        return results
 
     def can_accept_new_setup(self, symbol: str) -> bool:
         broker_ids = self.reconciler.active_setup_ids(symbol)
