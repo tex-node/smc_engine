@@ -267,3 +267,17 @@ MT5 closed candles → causal strategy → TradeSetup → broker-aware risk vali
 No `order_send()` is called by this path. A successful dry run reports entry, SL, TP, calculated volume and estimated monetary loss; rejected setups report the risk validation reason.
 
 This is the intended first live-market validation mode before enabling execution.
+
+
+### Phase 17 — Broker identity and live invalidation guards
+
+Added `src/smc_engine/order_guard.py`.
+
+Before an execution-capable path can submit a setup, the broker boundary can now:
+- find existing pending orders and positions for the strategy magic number;
+- detect an existing setup identity from the order/position comment;
+- reject duplicate submissions;
+- re-check the current bid/ask against entry and structural invalidation;
+- cancel an existing pending order through the MT5 removal action.
+
+The dry-run coordinator now uses these guards when supplied.
