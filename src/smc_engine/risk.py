@@ -81,6 +81,15 @@ class RiskEngine:
             raise ValueError("broker-calculated loss exceeds requested risk")
         return RiskQuote(volume, estimated_loss, float(risk_money), risk_percent)
 
+    def _loss_per_lot_decimal(self, entry: float, stop_loss: float) -> Decimal:
+        if self.mt5 is not None:
+            value = self._loss_per_lot(entry, stop_loss)
+            return Decimal(str(value))
+        if self.spec.tick_size <= 0 or self.spec.tick_value <= 0:
+            raise ValueError("broker tick size/value must be positive")
+        distance = abs(Decimal(str(entry)) - Decimal(str(stop_loss)))
+        return distance / Decimal(str(self.spec.tick_size)) * Decimal(str(self.spec.tick_value))
+
     def _loss_per_lot(self, entry: float, stop_loss: float) -> float:
         if self.mt5 is not None:
             order_type = (
