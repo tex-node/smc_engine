@@ -13,12 +13,12 @@ class PersistentLifecycle:
     lifecycle: SetupLifecycle
     store: SetupStore
 
-    def transition(self, new_state: SetupState, event_time: object, reason: str, ticket: Optional[int] = None) -> None:
+    def transition(self, new_state: SetupState, event_time: object, reason: str, ticket: Optional[int] = None, position_ticket: Optional[int] = None) -> None:
         previous = self.lifecycle.state
         previous_reason = self.lifecycle.reason
         self.lifecycle.transition(new_state, reason)
         try:
-            self.store.persist_transition(self.lifecycle.setup, previous, new_state, event_time, reason, ticket=ticket)
+            self.store.persist_transition(self.lifecycle.setup, previous, new_state, event_time, reason, ticket=ticket, position_ticket=position_ticket)
         except Exception:
             self.lifecycle.state = previous
             self.lifecycle.reason = previous_reason
@@ -290,7 +290,6 @@ class PersistentLifecycleCoordinator:
             )
 
         position_ticket = int(records[0].ticket)
-        self.store.set_position_ticket(setup_id, position_ticket)
         lifecycle = self.registry.get(setup_id)
         if lifecycle is None:
             setup = self.store.load_setup(setup_id)
@@ -305,12 +304,14 @@ class PersistentLifecycleCoordinator:
                 SetupState.FILLED,
                 event_time,
                 "explicit broker position recovery confirmed fill",
+                position_ticket=position_ticket,
             )
         if lifecycle.state is SetupState.FILLED:
             persistent.transition(
                 SetupState.POSITION_MANAGED,
                 event_time,
                 "explicit broker position recovery confirmed position",
+                position_ticket=position_ticket,
             )
         return ReconciliationResult(
             ReconciliationKind.BROKER_POSITION_RECOVERY_AVAILABLE,
