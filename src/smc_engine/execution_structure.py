@@ -81,7 +81,7 @@ def find_inducements(df: pd.DataFrame, order_blocks: list[OrderBlock], swings, m
             eligible = [s for s in eligible if getattr(s.type, 'value', s.type) == 'HIGH']
         if not eligible:
             continue
-        swing = eligible[-1]
+        swing = min(eligible, key=lambda s: (pd.Timestamp(getattr(s, "confirmation_time", s.time)), s.index))
         result.append(Inducement(
             id=f'IDM-{ob.id}-{swing.index}', direction=ob.direction, candle_index=swing.index,
             candle_time=swing.time, level=swing.price, source_swing_index=swing.index,
