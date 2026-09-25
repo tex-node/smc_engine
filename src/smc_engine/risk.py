@@ -117,3 +117,15 @@ class RiskEngine:
     def _volume_digits(self) -> int:
         step = f"{self.spec.volume_step:.10f}".rstrip("0")
         return max(0, len(step.split(".")[1])) if "." in step else 0
+
+
+def order_side(direction: Direction) -> str:
+    """Return the MT5-independent side name for a directional setup."""
+    return "BUY" if direction is Direction.BULLISH else "SELL"
+
+
+def pending_price_is_valid(direction: Direction, entry: float, bid: float, ask: float) -> bool:
+    """A limit entry must remain on the correct side of the live market."""
+    if direction is Direction.BULLISH:
+        return entry < ask
+    return entry > bid
