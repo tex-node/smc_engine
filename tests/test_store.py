@@ -74,3 +74,14 @@ def test_persisted_setup_can_be_reconstructed(tmp_path: Path):
     assert restored == setup
     assert restored.direction is Direction.BULLISH
     store.close()
+
+
+def test_position_ticket_is_persisted_separately(tmp_path: Path):
+    store = SetupStore(tmp_path / "state.sqlite3")
+    setup = make_setup()
+    store.upsert_setup(setup, SetupState.ORDER_PLACED, "2026-01-01T00:03:00Z", ticket=123)
+    store.set_position_ticket(setup.id, 456)
+    saved = store.get(setup.id)
+    assert saved["ticket"] == 123
+    assert saved["position_ticket"] == 456
+    store.close()
