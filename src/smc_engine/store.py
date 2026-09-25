@@ -15,7 +15,7 @@ from .models import Direction
 class SetupStore:
     """SQLite persistence boundary with transactional lifecycle writes."""
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
 
     def __init__(self, path: str | Path = "smc_engine_state.sqlite3"):
         self.path = str(path)
@@ -50,6 +50,10 @@ class SetupStore:
                 reason TEXT NOT NULL
             )"""
         )
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(setups)").fetchall()}
+        if "position_ticket" not in columns:
+            self._conn.execute("ALTER TABLE setups ADD COLUMN position_ticket INTEGER")
+
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_setups_symbol_state ON setups(symbol, state)")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_events_setup_time ON lifecycle_events(setup_id, event_time)")
         self._conn.execute(
@@ -121,14 +125,14 @@ class SetupStore:
 
     def get(self, setup_id: str) -> Optional[dict]:
         row = self._conn.execute(
-            "SELECT setup_id,symbol,state,created_time,updated_time,ticket,setup_json,reason FROM setups WHERE setup_id=?",
+            "SELECT setup_id,symbol,state,created_time,updated_time,ticket,position_ticket,setup_json,reason FROM setups WHERE setup_id=?",
             (setup_id,),
         ).fetchone()
         if row is None:
             return None
         return {"setup_id": row[0], "symbol": row[1], "state": SetupState(row[2]),
-                "created_time": row[3], "updated_time": row[4], "ticket": row[5],
-                "setup_json": json.loads(row[6]), "reason": row[7]}
+                "created_time": row[3], "updated_time": row[4], "ticket": row[5], "position_ticket": row[6],
+                "setup_json": json.loads(row[7]), "reason": row[8]}
 
     def active(self, symbol: str) -> list[dict]:
         terminal = tuple(state.value for state in {
@@ -139,13 +143,22 @@ class SetupStore:
         })
         placeholders = ",".join("?" for _ in terminal)
         rows = self._conn.execute(
-            f"SELECT setup_id,symbol,state,created_time,updated_time,ticket,setup_json,reason "
+            f"SELECT setup_id,symbol,state,created_time,updated_time,ticket,position_ticket,setup_json,reason "
             f"FROM setups WHERE symbol=? AND state NOT IN ({placeholders})",
             (symbol, *terminal),
         ).fetchall()
         return [{"setup_id": r[0], "symbol": r[1], "state": SetupState(r[2]),
-                 "created_time": r[3], "updated_time": r[4], "ticket": r[5],
-                 "setup_json": json.loads(r[6]), "reason": r[7]} for r in rows]
+                 "created_time": r[3], "updated_time": r[4], "ticket": r[5], "position_ticket": r[6],
+                 "setup_json": json.loads(r[7]), "reason": r[8]} for r in rows]
+
+    def set_position_ticket(self, setup_id: str, position_ticket: int) -> None:
+        with self._conn:
+            updated = self._conn.execute(
+                "UPDATE setups SET position_ticket=? WHERE setup_id=?",
+                (int(position_ticket), setup_id),
+            ).rowcount
+            if updated != 1:
+                raise ValueError(f"Unknown setup: {setup_id}")
 
     def close(self) -> None:
         self._conn.close()
