@@ -34,4 +34,10 @@ class LivePollingCoordinator:
         if self.state.last_closed_m15_time == closed_time:
             return None
         self.state.last_closed_m15_time = closed_time
+        # Do not analyze a replacement setup while a restored/persisted setup is active.
+        if self.lifecycle is not None and not self.lifecycle.can_accept_new_setup(self.market.symbol):
+            return DryRunReport(
+                self.market.symbol, None, None, None, None, None, None, None,
+                "POLL: active persisted or broker setup exists; no replacement analysis",
+            )
         return self.dry_run.run_once(balance)
