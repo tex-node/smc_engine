@@ -125,6 +125,11 @@ class CausalMTFAnalyzer:
                     idms = find_inducements(
                         m15_view, [block], swings_after, self.config.m15_idm_window, as_of=as_of
                     )
+                    # An order block must already exist when its IDM is confirmed.
+                    idms = [
+                        x for x in idms
+                        if pd.Timestamp(block.source_displacement_index >= 0 and m15_view.iloc[block.source_displacement_index]["time"]) <= pd.Timestamp(x.confirmation_time)
+                    ]
                     contexts = execution_context(poi, [block], idms, poi.direction)
                     for context in contexts:
                         event_time = context.inducement.confirmation_time or context.inducement.candle_time
