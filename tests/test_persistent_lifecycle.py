@@ -127,3 +127,23 @@ def test_unknown_magic_owned_broker_object_blocks_new_setup(tmp_path: Path):
     assert results[0].setup_id == "BROKER-UNKNOWN-ORDER-99"
     assert not coordinator.can_accept_new_setup("EURAUD")
     store.close()
+
+
+def test_restart_reconciles_submitting_order_to_placed(tmp_path: Path):
+    store = SetupStore(tmp_path / "state.sqlite3")
+    setup = make_setup()
+    store.upsert_setup(setup, SetupState.ORDER_SUBMITTING, "2026-01-01T00:01:00Z")
+    mt5 = FakeMT5()
+    mt5.orders = [SimpleNamespace(ticket=77, magic=202609, comment="SMC SETUP-EURAUD-1-OB")]
+    registry = SetupRegistry()
+    coordinator = PersistentLifecycleCoordinator(
+        store, MT5LifecycleReconciler(mt5, 202609, registry), registry
+    )
+
+    results = coordinator.startup_reconcile("EURAUD")
+    assert results[0].kind == ReconciliationKind.SUBMISSION_CONFIRMED
+    assert registry.get(setup.id).state is SetupState.ORDER_PLACED
+    row = store.get(setup.id)
+    assert row["state"] is SetupState.ORDER_PLACED
+    assert row["ticket"] == 77
+    store.close()
