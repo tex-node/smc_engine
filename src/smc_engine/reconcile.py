@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+import re
 
 from .lifecycle import SetupLifecycle, SetupRegistry, SetupState
 
@@ -73,10 +74,9 @@ class MT5LifecycleReconciler:
 
     @staticmethod
     def setup_id_from_comment(comment: str) -> str | None:
-        marker = "SETUP-"
         text = str(comment)
-        start = text.find(marker)
-        return text[start:].split()[0] if start >= 0 else None
+        match = re.search(r"(?<!\\w)(SETUP-[^\\s]+)", text)
+        return match.group(1) if match else None
 
     @classmethod
     def _setup_id(cls, comment: str) -> str | None:
