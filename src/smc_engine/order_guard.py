@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Optional
+import re
 
 from .models import Direction
 from .setup import TradeSetup
@@ -50,12 +51,17 @@ class MT5OrderGuard:
     def has_active_identity(self, setup: TradeSetup) -> bool:
         identity = setup.id
         for order in self.pending_orders(setup.symbol):
-            if identity in str(getattr(order, "comment", "")):
+            if self._comment_has_identity(getattr(order, "comment", ""), identity):
                 return True
         for position in self.positions(setup.symbol):
-            if identity in str(getattr(position, "comment", "")):
+            if self._comment_has_identity(getattr(position, "comment", ""), identity):
                 return True
         return False
+
+    @staticmethod
+    def _comment_has_identity(comment: str, setup_id: str) -> bool:
+        text = str(comment)
+        return re.search(rf"(?<!\\w){re.escape(setup_id)}(?!\\w)", text) is not None
 
     def setup_is_still_valid(
         self,
