@@ -58,6 +58,24 @@ class DryRunEngine:
         setup = candidate.setup
         try:
             self.risk.validate_setup(setup)
+            if self.order_guard is not None:
+                if self.order_guard.has_active_identity(setup):
+                    return DryRunReport(
+                        setup.symbol, setup.id, SetupState.ORDER_PLACED,
+                        setup.entry, setup.stop_loss, setup.take_profit,
+                        None, None,
+                        "DRY RUN: active broker order/position already exists for setup; no replacement intent",
+                    )
+                tick = self.market.tick()
+                if not self.order_guard.setup_is_still_valid(
+                    setup, float(tick["bid"]), float(tick["ask"])
+                ):
+                    return DryRunReport(
+                        setup.symbol, setup.id, SetupState.PROTECTED_LEVEL_BREACHED,
+                        setup.entry, setup.stop_loss, setup.take_profit,
+                        None, None,
+                        "DRY RUN: setup invalidated by current broker price; no order intent",
+                    )
             quote = self.risk.volume_for_risk(
                 balance,
                 setup.risk_percent,
