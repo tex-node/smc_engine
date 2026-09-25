@@ -77,14 +77,35 @@ def detect_structure_breaks(df: pd.DataFrame, swings: list[SwingPoint], start_in
                 events.append(StructureEvent(f"BOS-L-{i}", StructureEventType.BOS, Direction.BEARISH, l.price, i, row["time"], l.id))
     return events
 
-def confirm_csd(df: pd.DataFrame, sweep: LiquiditySweep, breaks: list[StructureEvent], max_bars_after_sweep: int = 6) -> Optional[StructureEvent]:
+def confirm_csd(
+    df: pd.DataFrame,
+    sweep: LiquiditySweep,
+    breaks: list[StructureEvent],
+    max_bars_after_sweep: int = 6,
+    swings: Optional[list[SwingPoint]] = None,
+) -> Optional[StructureEvent]:
     """Confirm the first opposite-direction break of pre-sweep confirmed structure."""
     desired = Direction.BULLISH if sweep.side is LiquiditySide.SELL_SIDE else Direction.BEARISH
-    candidates = [
-        b for b in breaks
-        if b.direction is desired
-        and sweep.candle_index < b.candle_index <= sweep.candle_index + max_bars_after_sweep
-    ]
+    swing_by_id = {s.id: s for s in (swings or [])}
+    candidates = []
+    for b in breaks:
+        if b.direction is not desired:
+            continue
+        if not (sweep.candle_index < b.candle_index <= sweep.candle_index + max_bars_after_sweep):
+            continue
+        if b.source_swing_id is None:
+            continue
+        source = swing_by_id.get(b.source_swing_id)
+        if source is not None:
+            if not (source.index < sweep.candle_index and source.confirmation_index <= sweep.candle_index):
+                continue
+        else:
+            try:
+                source_index = int(b.source_swing_id.rsplit("-", 1)[1])
+            except (ValueError, IndexError):
+                continue
+            if source_index >= sweep.candle_index:
+                continue
     if not candidates:
         return None
     b = candidates[0]
