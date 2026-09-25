@@ -78,3 +78,30 @@ Defaults are set at the top of `main()` in `varis_smc_bot.py`:
 | `atr_period` | `14` | ATR period for displacement filter |
 | `displacement_mult` | `1.5` | Candle body multiple of ATR to qualify as displacement |
 | `magic` | `202609` | Order magic number for tracking bot orders |
+
+
+## Refactor status — market structure foundation
+
+The branch refactor/market-structure-foundation introduces the first production-oriented foundation without changing the existing live bot:
+
+- closed-candle MT5 market-data adapter (copy_rates_from_pos starting at position 1)
+- broker symbol metadata model
+- confirmed pivot swing detection
+- explicit buy-side/sell-side liquidity pools
+- wick-through/close-back liquidity sweep events
+- structural break events based on actual level crossing
+- bounded post-sweep CSD confirmation
+- typed domain models for swings, liquidity, POIs and structure state
+- pytest fixtures for swing/sweep/CSD behavior
+- package metadata for a src/ layout
+
+This is deliberately additive. The existing varis_smc_bot.py remains untouched until the new primitives are validated against historical replay and then wired into the strategy state machine.
+
+### Next implementation sequence
+
+1. Validate swing/liquidity/CSD primitives against historical candles.
+2. Add D1 POI lifecycle: displacement, active/unmitigated, touch, mitigation and invalidation.
+3. Add M15 order-block and inducement detection.
+4. Add structural IRL targeting.
+5. Replace the current risk/execution layer with broker-aware validation using MT5 symbol properties, order_check() and order_calc_profit().
+6. Introduce the setup state machine and only then connect the new engine to live/demo execution.
