@@ -42,7 +42,7 @@ class MT5ExecutionAdapter:
         balance: float,
         bid: float,
         ask: float,
-        comment: str = "SMC",
+        comment: str | None = None,
     ) -> PendingOrderRequest:
         self.risk.validate_setup(setup)
         if not pending_price_is_valid(setup.direction, setup.entry, bid, ask):
@@ -58,7 +58,7 @@ class MT5ExecutionAdapter:
             stop_loss=self._normalize_price(setup.stop_loss),
             take_profit=self._normalize_price(setup.take_profit),
             magic=self.magic,
-            comment=comment,
+            comment=comment or f"SMC SETUP-{setup.id}",
             filling_mode=filling,
         )
 
