@@ -32,35 +32,19 @@ def test_sell_side_sweep_and_bullish_csd():
     assert csd.source_sweep_id == bullish_sweep.id
 
 
-def test_csd_rejects_break_from_post_sweep_swing():
-    df = candles([
-        [1,10,12,9,11], [2,11,13,10,12], [3,12,14,8,9],
-        [4,9,15,8,14], [5,14,16,12,15], [6,15,17,13,16],
-    ])
-    swings = find_swings(df, left=1, right=1)
-    sweep = next(s for s in detect_sweeps(df, build_liquidity_pools(swings), 4) if s.side.value == "SELL_SIDE")
-    post_sweep = next(s for s in swings if s.index > sweep.candle_index and s.type.value == "HIGH")
-    bad = type("Break", (), {
-        "direction": __import__("src.smc_engine.models", fromlist=["Direction"]).Direction.BULLISH,
-        "candle_index": sweep.candle_index + 1,
-        "candle_time": df.iloc[sweep.candle_index + 1]["time"],
-        "level": post_sweep.price,
-        "source_swing_id": post_sweep.id,
-    })()
-    assert confirm_csd(df, sweep, [bad], 4, swings=swings) is None
+def test_csd_rejects_post_sweep_structural_source_when_swings_supplied():
+    from src.smc_engine.models import Direction, LiquiditySide, LiquiditySweep, StructureEvent, StructureEventType, SwingPoint, SwingType
+    sweep = LiquiditySweep("SWEEP-X", LiquiditySide.SELL_SIDE, 100.0, 98.0, "LQ-SL-2", 5, 6, 101.0)
+    post = SwingPoint("SH-6", 6, 7, SwingType.HIGH, 105.0, 2, 8, 9)
+    event = StructureEvent("BOS-H-7", StructureEventType.BOS, Direction.BULLISH, 105.0, 7, 8, "SH-6")
+    df = candles([[i, 100, 101, 99, 100] for i in range(12)])
+    assert confirm_csd(df, sweep, [event], 4, swings=[post]) is None
 
 
-def test_csd_rejects_unconfirmed_pre_sweep_swing():
-    df = candles([
-        [1,10,12,9,11], [2,11,13,10,12], [3,12,14,8,9],
-        [4,9,15,8,14], [5,14,16,12,15], [6,15,17,13,16],
-        [7,16,18,14,17],
-    ])
-    swings = find_swings(df, left=1, right=2)
-    sweep = next(s for s in detect_sweeps(df, build_liquidity_pools(swings), 4) if s.side.value == "SELL_SIDE")
-    candidate = next((b for b in detect_structure_breaks(df, swings)
-                      if b.direction.value == "BULLISH"
-                      and sweep.candle_index < b.candle_index <= sweep.candle_index + 4), None)
-    if candidate is not None:
-        source = next(s for s in swings if s.id == candidate.source_swing_id)
-        assert confirm_csd(df, sweep, [candidate], 4, swings=swings) is (candidate if source.confirmation_index <= sweep.candle_index and source.index < sweep.candle_index else None)
+def test_csd_rejects_unconfirmed_pre_sweep_structural_source():
+    from src.smc_engine.models import Direction, LiquiditySide, LiquiditySweep, StructureEvent, StructureEventType, SwingPoint, SwingType
+    sweep = LiquiditySweep("SWEEP-X", LiquiditySide.SELL_SIDE, 100.0, 98.0, "LQ-SL-2", 5, 6, 101.0)
+    unconfirmed = SwingPoint("SH-3", 3, 4, SwingType.HIGH, 105.0, 2, 6, 7)
+    event = StructureEvent("BOS-H-7", StructureEventType.BOS, Direction.BULLISH, 105.0, 7, 8, "SH-3")
+    df = candles([[i, 100, 101, 99, 100] for i in range(12)])
+    assert confirm_csd(df, sweep, [event], 4, swings=[unconfirmed]) is None
