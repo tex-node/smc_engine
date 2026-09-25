@@ -136,3 +136,20 @@ The execution layer now has explicit primitives for:
 - joining D1 POI + M15 OB + IDM into an execution context
 
 These are detection primitives only. They do not place orders and are not yet connected to the live bot.
+
+
+### Phase 5 — IRL and TradeSetup contract
+
+Added `src/smc_engine/setup.py` and `tests/test_setup.py`.
+
+The strategy boundary now includes:
+
+- structural IRL targeting from the nearest unmitigated swing beyond entry
+- protected level derived from the H4 sweep extreme
+- deterministic entry from M15 OB mitigation
+- stop-loss geometry beyond the protected level
+- setup invalidation level
+- typed `TradeSetup` contract linking D1 POI, H4 sweep/CSD, M15 OB/IDM and IRL
+- reward/risk distance and R:R calculations
+
+The setup contract is still analysis-only. MT5 risk sizing and order validation remain a separate execution concern.
