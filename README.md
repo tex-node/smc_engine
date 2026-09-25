@@ -236,3 +236,12 @@ This is the first end-to-end MT5-facing layer:
 MT5 closed D1/H4/M15 candles → pure multi-timeframe strategy → candidate TradeSetup → lifecycle registry.
 
 It remains strictly read-only. No `order_send()` is reachable from this analyzer.
+
+
+### Phase 11 — Causal multi-timeframe alignment
+
+Added `src/smc_engine/causal.py` and `tests/test_causal.py`.
+
+The strategy can now be evaluated at a specific historical `as_of` timestamp. Each timeframe is truncated to the latest candle available at that timestamp, and M15 execution structures are evaluated only after the H4 CSD timestamp.
+
+This prevents look-ahead contamination when historical D1/H4/M15 data is combined.
