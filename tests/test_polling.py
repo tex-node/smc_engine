@@ -1,5 +1,7 @@
 import pandas as pd
 
+from src.smc_engine.persistent_lifecycle import PersistentLifecycleCoordinator
+
 from src.smc_engine.polling import LivePollingCoordinator
 
 
@@ -33,3 +35,21 @@ def test_poll_only_runs_for_new_closed_m15_candle():
     assert coordinator.poll_once(1000) is None
     assert coordinator.poll_once(1000) == 2
     assert dry_run.calls == 2
+
+
+class BlockingLifecycle:
+    def __init__(self):
+        self.calls = 0
+    def can_accept_new_setup(self, symbol):
+        self.calls += 1
+        return False
+
+
+def test_poll_blocks_replacement_when_active_lifecycle_exists():
+    market = FakeMarket()
+    dry_run = FakeDryRun()
+    lifecycle = BlockingLifecycle()
+    coordinator = LivePollingCoordinator(market, dry_run, lifecycle)
+    report = coordinator.poll_once(1000)
+    assert report.message.startswith("POLL: active")
+    assert dry_run.calls == 0
