@@ -1,8 +1,6 @@
-
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 import pandas as pd
 
@@ -14,17 +12,10 @@ from .structure import build_liquidity_pools, confirm_csd, detect_structure_brea
 from .strategy import CandidateSetup, MultiTimeframeConfig
 
 
-def _time(df: pd.DataFrame, index: int):
-    return df.iloc[index]["time"]
-
-
 def _latest_index_at_or_before(df: pd.DataFrame, timestamp) -> int:
-    times = pd.to_datetime(df["time"], utc=True)
+    times = pd.to_datetime(df['time'], utc=True)
     target = pd.Timestamp(timestamp)
-    if target.tzinfo is None:
-        target = target.tz_localize("UTC")
-    else:
-        target = target.tz_convert("UTC")
+    target = target.tz_localize('UTC') if target.tzinfo is None else target.tz_convert('UTC')
     eligible = times <= target
     if not eligible.any():
         return -1
@@ -38,23 +29,18 @@ class CausalCandidate:
 
 
 class CausalMTFAnalyzer:
-    """Causally aligned D1/H4/M15 analyzer.
-
-    Every lower-timeframe decision is made only from candles whose close time
-    is <= the setup candle timestamp. No future M15/H4 information is used.
-    """
+    """Causally aligned D1/H4/M15 analyzer."""
 
     def __init__(self, symbol: str, config: MultiTimeframeConfig = MultiTimeframeConfig()):
         self.symbol = symbol
         self.config = config
 
     def analyze_at(self, d1: pd.DataFrame, h4: pd.DataFrame, m15: pd.DataFrame, as_of=None) -> list[CausalCandidate]:
-        d1 = d1.sort_values("time").reset_index(drop=True)
-        h4 = h4.sort_values("time").reset_index(drop=True)
-        m15 = m15.sort_values("time").reset_index(drop=True)
-
+        d1 = d1.sort_values('time').reset_index(drop=True)
+        h4 = h4.sort_values('time').reset_index(drop=True)
+        m15 = m15.sort_values('time').reset_index(drop=True)
         if as_of is None:
-            as_of = m15.iloc[-1]["time"]
+            as_of = m15.iloc[-1]['time']
 
         d1_end = _latest_index_at_or_before(d1, as_of)
         h4_end = _latest_index_at_or_before(h4, as_of)
@@ -66,97 +52,89 @@ class CausalMTFAnalyzer:
         h4_view = h4.iloc[:h4_end + 1].reset_index(drop=True)
         m15_view = m15.iloc[:m15_end + 1].reset_index(drop=True)
 
-        pois = active_unmitigated_pois(
-            d1_view,
-            lookback_bars=min(self.config.d1_poi_lookback, len(d1_view)),
-            config=DisplacementConfig(),
-        )
-        if not pois:
-            return []
-
         h4_swings = find_swings(h4_view, self.config.h4_swing_left, self.config.h4_swing_right)
+        swing_by_id = {s.id: s for s in h4_swings}
         liquidity = build_liquidity_pools(h4_swings)
         sweeps = detect_sweeps(h4_view, liquidity, self.config.h4_sweep_lookback)
+        # A sweep cannot use a swing before that swing's right-side confirmation candle.
+        sweeps = [
+            s for s in sweeps
+            if swing_by_id.get(next((p.source_swing_id for p in liquidity if p.id == s.source_liquidity_id), ''), None) is not None
+            and swing_by_id[next(p.source_swing_id for p in liquidity if p.id == s.source_liquidity_id)].confirmation_index <= s.candle_index
+        ]
         breaks = detect_structure_breaks(h4_view, h4_swings)
 
         m15_work = detect_displacement(
             m15_view,
-            DisplacementConfig(
-                atr_period=self.config.m15_atr_period,
-                body_atr_multiple=self.config.m15_displacement_atr,
-            ),
+            DisplacementConfig(atr_period=self.config.m15_atr_period, body_atr_multiple=self.config.m15_displacement_atr),
         )
-        displacement_indices = [
+        m15_displacement_indices = [
             i for i, row in m15_work.iterrows()
-            if bool(row["displacement_bullish"] or row["displacement_bearish"])
+            if bool(row['displacement_bullish'] or row['displacement_bearish'])
         ]
-        blocks = find_order_blocks(m15_work, displacement_indices, "M15", self.config.m15_ob_search_back)
-        swings15 = find_swings(m15_view, self.config.m15_swing_left, self.config.m15_swing_right)
+        m15_swings = find_swings(m15_view, self.config.m15_swing_left, self.config.m15_swing_right)
 
+        candidates: list[CausalCandidate] = []
+        for sweep in sweeps:
+            d1_sweep_end = _latest_index_at_or_before(d1_view, sweep.candle_time)
+            if d1_sweep_end < 0:
+                continue
+            d1_at_sweep = d1_view.iloc[:d1_sweep_end + 1].reset_index(drop=True)
+            pois = active_unmitigated_pois(
+                d1_at_sweep,
+                lookback_bars=min(self.config.d1_poi_lookback, len(d1_at_sweep)),
+                config=DisplacementConfig(),
+            )
+            if not pois:
+                continue
 
-        candidates = []
-        for poi in pois:
-            for sweep in sweeps:
+            csd = None
+            for poi in pois:
                 desired_side = LiquiditySide.SELL_SIDE if poi.direction is Direction.BULLISH else LiquiditySide.BUY_SIDE
                 if sweep.side is not desired_side:
+                    continue
+                if not (poi.created_time <= sweep.candle_time):
                     continue
                 csd = confirm_csd(h4_view, sweep, breaks, self.config.h4_csd_window)
                 if csd is None:
                     continue
 
-                setup_time = csd.candle_time
-                m15_end_for_csd = _latest_index_at_or_before(m15_view, setup_time)
+                m15_end_for_csd = _latest_index_at_or_before(m15_view, csd.candle_time)
                 if m15_end_for_csd < 0:
                     continue
-
-                # Execution structures must form after CSD and only use data
-                # available after that event.
-                m15_after = m15_view.iloc[m15_end_for_csd + 1:].reset_index(drop=True)
-                if len(m15_after) < self.config.m15_swing_left + self.config.m15_swing_right + 2:
+                m15_after_indices = [i for i in m15_displacement_indices if i > m15_end_for_csd]
+                blocks = find_order_blocks(m15_work, m15_after_indices, 'M15', self.config.m15_ob_search_back)
+                blocks = [b for b in blocks if b.candle_index > m15_end_for_csd and b.source_displacement_index > m15_end_for_csd]
+                if not blocks:
                     continue
 
-                m15_after_work = detect_displacement(
-                    m15_after,
-                    DisplacementConfig(
-                        atr_period=self.config.m15_atr_period,
-                        body_atr_multiple=self.config.m15_displacement_atr,
-                    ),
-                )
-                disp_after = [
-                    i for i, row in m15_after_work.iterrows()
-                    if bool(row["displacement_bullish"] or row["displacement_bearish"])
+                swings_after = [
+                    s for s in m15_swings
+                    if s.index > m15_end_for_csd and s.confirmation_index <= m15_end
                 ]
-                blocks_after = find_order_blocks(
-                    m15_after_work, disp_after, "M15", self.config.m15_ob_search_back
-                )
-                swings_after = find_swings(
-                    m15_after, self.config.m15_swing_left, self.config.m15_swing_right
-                )
-                idms_after = find_inducements(
-                    m15_after, blocks_after, swings_after, self.config.m15_idm_window
-                )
-                contexts = execution_context(poi, blocks_after, idms_after, poi.direction)
+                if not swings_after:
+                    continue
 
-                for context in contexts:
-                    # A setup can only be created after the OB/IDM exists.
-                    event_time = context.order_block.candle_time
-                    irl = find_irl_target(
-                        context.order_block.mitigation_price,
-                        context.direction,
-                        swings_after,
+                for block in blocks:
+                    idms = find_inducements(
+                        m15_view, [block], swings_after, self.config.m15_idm_window, as_of=as_of
                     )
-                    if irl is None:
-                        continue
-                    if pd.Timestamp(irl.candle_time) > pd.Timestamp(event_time):
-                        continue
-                    try:
-                        setup = build_trade_setup(
-                            self.symbol, context, sweep, csd, irl,
-                            risk_percent=self.config.risk_percent,
-                            created_time=event_time,
+                    contexts = execution_context(poi, [block], idms, poi.direction)
+                    for context in contexts:
+                        event_time = context.inducement.confirmation_time or context.inducement.candle_time
+                        irl = find_irl_target(
+                            context.order_block.mitigation_price, context.direction, swings_after,
+                            as_of=event_time,
                         )
-                    except ValueError:
-                        continue
-                    candidates.append(CausalCandidate(setup, event_time))
+                        if irl is None:
+                            continue
+                        try:
+                            setup = build_trade_setup(
+                                self.symbol, context, sweep, csd, irl,
+                                risk_percent=self.config.risk_percent, created_time=event_time,
+                            )
+                        except ValueError:
+                            continue
+                        candidates.append(CausalCandidate(setup, event_time))
 
         return candidates
