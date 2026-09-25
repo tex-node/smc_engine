@@ -73,3 +73,25 @@ def test_inducement_requires_swing_confirmation_by_as_of():
 
     assert find_inducements(x, blocks, [late], as_of=4) == []
     assert len(find_inducements(x, blocks, [early], as_of=4)) == 1
+
+
+def test_inducement_window_is_anchored_to_order_block():
+    x = candles([[i, 100, 101, 99, 100] for i in range(10)])
+    # Displacement is intentionally much later than the OB. A swing after the
+    # OB window but within displacement+window must not qualify as an IDM.
+    blocks = [
+        __import__("src.smc_engine.execution_structure", fromlist=["OrderBlock"]).OrderBlock(
+            id="OB-M15-1-BULLISH",
+            direction=Direction.BULLISH,
+            timeframe="M15",
+            candle_index=1,
+            candle_time=2,
+            low=98,
+            high=100,
+            mitigation_price=100,
+            source_displacement_index=8,
+        )
+    ]
+    late_swing = SwingPoint("SL-LATE", 7, 8, SwingType.LOW, 99, 5, 7, 8)
+
+    assert find_inducements(x, blocks, [late_swing], max_bars_after_ob=3) == []
