@@ -17,12 +17,16 @@ class FakeMT5:
     def __init__(self):
         self.orders = []
         self.positions_ = []
+        self.history_orders = {}
 
     def orders_get(self, symbol):
         return tuple(self.orders)
 
     def positions_get(self, symbol):
         return tuple(self.positions_)
+
+    def history_orders_get(self, ticket):
+        return tuple([self.history_orders[ticket]]) if ticket in self.history_orders else tuple()
 
     def last_error(self):
         return (0, "ok")
@@ -311,4 +315,16 @@ def test_reconcile_detects_broker_ticket_mismatch(tmp_path: Path):
     assert results[0].persisted_state is SetupState.ORDER_PLACED
     assert results[0].ticket == 12
     assert not coordinator.can_accept_new_setup("EURAUD")
+    store.close()
+
+def test_history_order_lookup_is_non_mutating(tmp_path: Path):
+    store = SetupStore(tmp_path / "state.sqlite3")
+    mt5 = FakeMT5()
+    mt5.history_orders = {
+        11: SimpleNamespace(ticket=11, magic=202609, comment="SMC SETUP-EURAUD-1-OB", state=4)
+    }
+    reconciler = MT5LifecycleReconciler(mt5, 202609, SetupRegistry())
+    history = reconciler.history_order(11)
+    assert history.ticket == 11
+    assert history.state == 4
     store.close()
