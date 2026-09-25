@@ -346,6 +346,7 @@ def test_missing_broker_order_can_be_resolved_from_history_without_state_change(
     assert result.kind == ReconciliationKind.HISTORICAL_ORDER_FOUND
     assert result.ticket == 11
     assert result.persisted_state is SetupState.ORDER_PLACED
+    assert result.historical_order_state == 4
     assert store.get(setup.id)["state"] is SetupState.ORDER_PLACED
     store.close()
 
