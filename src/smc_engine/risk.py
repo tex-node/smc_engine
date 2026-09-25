@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import floor
 from decimal import Decimal, ROUND_DOWN
 from typing import Any
 
@@ -63,9 +62,9 @@ class RiskEngine:
         loss_per_lot = self._loss_per_lot(entry, stop_loss)
         if loss_per_lot <= 0:
             raise ValueError("calculated loss per lot must be positive")
-        raw = risk_money / loss_per_lot
-        volume = floor(raw / self.spec.volume_step) * self.spec.volume_step
-        volume = round(volume, self._volume_digits())
+        step = Decimal(str(self.spec.volume_step))
+        raw = Decimal(str(risk_money / loss_per_lot))
+        volume = float((raw / step).to_integral_value(rounding=ROUND_DOWN) * step)
         if volume < self.spec.volume_min:
             raise ValueError(
                 f"Calculated volume {volume} is below broker minimum {self.spec.volume_min}; "
