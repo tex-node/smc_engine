@@ -63,6 +63,8 @@ class MT5ExecutionAdapter:
         )
 
     def _resolve_filling_mode(self) -> int | None:
+        if not hasattr(self.mt5, "symbol_info"):
+            return self.risk.spec.filling_mode or None
         info = self.mt5.symbol_info(self.risk.spec.symbol)
         if info is None:
             raise RuntimeError("Unable to read symbol information")
