@@ -58,9 +58,16 @@ class MT5ExecutionAdapter:
             stop_loss=self._normalize_price(setup.stop_loss),
             take_profit=self._normalize_price(setup.take_profit),
             magic=self.magic,
-            comment=comment or f"SMC SETUP-{setup.id}",
+            comment=comment or self._broker_comment(setup.id),
             filling_mode=filling,
         )
+
+    @staticmethod
+    def _broker_comment(setup_id: str) -> str:
+        comment = f"SMC {setup_id}"
+        if len(comment) > 31:
+            raise ValueError("setup id is too long for the MT5 order comment identity")
+        return comment
 
     def _resolve_filling_mode(self) -> int | None:
         if not hasattr(self.mt5, "symbol_info"):
@@ -105,6 +112,11 @@ class MT5ExecutionAdapter:
         result = self.mt5.order_check(mt5_request)
         if result is None:
             raise RuntimeError(f"MT5 order_check failed: {self.mt5.last_error()}")
+        retcode = getattr(result, "retcode", None)
+        if retcode is None and isinstance(result, dict):
+            retcode = result.get("retcode")
+        if retcode not in (None, 0):
+            raise ValueError(f"MT5 order_check rejected request retcode={retcode}")
         return result
 
     def send(self, mt5_request: dict[str, Any]) -> Any:
