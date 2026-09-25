@@ -151,8 +151,11 @@ class PersistentLifecycleCoordinator:
             execution.preflight(payload)
             PersistentLifecycle(lifecycle, self.store).transition(SetupState.ORDER_PREFLIGHTED, event_time, "broker preflight passed")
         elif lifecycle.state is SetupState.ORDER_PREFLIGHTED:
+            # A restart may have occurred after the previous preflight. Rebuild
+            # and re-preflight the exact request that will be submitted.
             request = execution.build_limit_request(lifecycle.setup, balance, bid, ask)
             payload = execution.to_mt5_request(request)
+            execution.preflight(payload)
         else:
             raise ValueError(f"Cannot submit lifecycle in state {lifecycle.state.value}")
         PersistentLifecycle(lifecycle, self.store).transition(SetupState.ORDER_SUBMITTING, event_time, "durable submission intent recorded")
