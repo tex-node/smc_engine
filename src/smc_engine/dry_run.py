@@ -55,7 +55,6 @@ class DryRunEngine:
         setup = candidate.setup
         try:
             self.risk.validate_setup(setup)
-            tick = self.market.tick()
             quote = self.risk.volume_for_risk(
                 balance,
                 setup.risk_percent,
