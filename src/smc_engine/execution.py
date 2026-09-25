@@ -1,11 +1,10 @@
-
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
 
 from .models import Direction
-from .risk import RiskEngine, order_side, pending_price_is_valid
+from .risk import RiskEngine, pending_price_is_valid
 from .setup import TradeSetup
 
 
@@ -19,15 +18,23 @@ class PendingOrderRequest:
     take_profit: float
     magic: int
     comment: str
+    filling_mode: int | None = None
 
 
 class MT5ExecutionAdapter:
-    """Thin execution boundary. SMC logic must not live here."""
+    """Broker execution boundary. SMC logic must not live here."""
 
     def __init__(self, mt5_module: Any, risk: RiskEngine, magic: int = 202609):
         self.mt5 = mt5_module
         self.risk = risk
         self.magic = magic
+
+    def _normalize_price(self, price: float) -> float:
+        tick_size = self.risk.spec.tick_size or self.risk.spec.point
+        if tick_size <= 0:
+            raise ValueError("symbol tick size must be positive")
+        normalized = round(round(price / tick_size) * tick_size, self.risk.spec.digits)
+        return normalized
 
     def build_limit_request(
         self,
@@ -41,22 +48,33 @@ class MT5ExecutionAdapter:
         if not pending_price_is_valid(setup.direction, setup.entry, bid, ask):
             raise ValueError("Limit entry is no longer valid at current market")
 
-        quote = self.risk.volume_for_risk(
-            balance,
-            setup.risk_percent,
-            setup.entry,
-            setup.stop_loss,
-        )
+        quote = self.risk.volume_for_risk(balance, setup.risk_percent, setup.entry, setup.stop_loss)
+        filling = self._resolve_filling_mode()
         return PendingOrderRequest(
             symbol=setup.symbol,
             direction=setup.direction,
             volume=quote.volume,
-            price=setup.entry,
-            stop_loss=setup.stop_loss,
-            take_profit=setup.take_profit,
+            price=self._normalize_price(setup.entry),
+            stop_loss=self._normalize_price(setup.stop_loss),
+            take_profit=self._normalize_price(setup.take_profit),
             magic=self.magic,
             comment=comment,
+            filling_mode=filling,
         )
+
+    def _resolve_filling_mode(self) -> int | None:
+        info = self.mt5.symbol_info(self.risk.spec.symbol)
+        if info is None:
+            raise RuntimeError("Unable to read symbol information")
+        supported = getattr(info, "filling_mode", 0)
+        for mode in (
+            getattr(self.mt5, "ORDER_FILLING_RETURN", None),
+            getattr(self.mt5, "ORDER_FILLING_IOC", None),
+            getattr(self.mt5, "ORDER_FILLING_FOK", None),
+        ):
+            if mode is not None and supported & mode:
+                return mode
+        return None
 
     def to_mt5_request(self, request: PendingOrderRequest) -> dict[str, Any]:
         order_type = (
@@ -64,7 +82,7 @@ class MT5ExecutionAdapter:
             if request.direction is Direction.BULLISH
             else self.mt5.ORDER_TYPE_SELL_LIMIT
         )
-        return {
+        payload = {
             "action": self.mt5.TRADE_ACTION_PENDING,
             "symbol": request.symbol,
             "volume": request.volume,
@@ -77,9 +95,11 @@ class MT5ExecutionAdapter:
             "comment": request.comment,
             "type_time": self.mt5.ORDER_TIME_GTC,
         }
+        if request.filling_mode is not None:
+            payload["type_filling"] = request.filling_mode
+        return payload
 
     def preflight(self, mt5_request: dict[str, Any]) -> Any:
-        """Broker-side validation without sending an order."""
         result = self.mt5.order_check(mt5_request)
         if result is None:
             raise RuntimeError(f"MT5 order_check failed: {self.mt5.last_error()}")
