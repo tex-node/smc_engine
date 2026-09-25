@@ -102,6 +102,7 @@ def confirm_csd(
         else:
             if swings is not None:
                 continue
+        candidates.append(b)
     if not candidates:
         return None
     b = candidates[0]
