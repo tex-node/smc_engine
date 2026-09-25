@@ -61,7 +61,7 @@ class MT5OrderGuard:
     @staticmethod
     def _comment_has_identity(comment: str, setup_id: str) -> bool:
         text = str(comment)
-        return re.search(rf"(?<!\\w){re.escape(setup_id)}(?!\\w)", text) is not None
+        return re.search(rf"(?<!\w){re.escape(setup_id)}(?!\w)", text) is not None
 
     def setup_is_still_valid(
         self,
