@@ -63,3 +63,10 @@ def test_live_bearish_invalidation():
     guard = MT5OrderGuard(FakeMT5(), 202609)
     assert guard.setup_is_still_valid(s, bid=0.89, ask=0.90)
     assert not guard.setup_is_still_valid(s, bid=1.01, ask=1.02)
+
+
+def test_setup_identity_does_not_match_prefix_collision():
+    mt5 = FakeMT5()
+    mt5.orders = [SimpleNamespace(magic=202609, comment="SMC SETUP-X2")]
+    guard = MT5OrderGuard(mt5, 202609)
+    assert not guard.has_active_identity(setup())
