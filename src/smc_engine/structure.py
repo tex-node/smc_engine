@@ -19,9 +19,9 @@ def find_swings(df: pd.DataFrame, left: int = 3, right: int = 3) -> list[SwingPo
     for i in range(left, len(df) - right):
         h, l = highs[i], lows[i]
         if h > max(highs[i-left:i]) and h >= max(highs[i+1:i+right+1]):
-            swings.append(SwingPoint(f"SH-{i}", i, df.iloc[i]["time"], SwingType.HIGH, float(h), left + right))
+            swings.append(SwingPoint(f"SH-{i}", i, df.iloc[i]["time"], SwingType.HIGH, float(h), left + right, i + right, df.iloc[i + right]["time"]))
         if l < min(lows[i-left:i]) and l <= min(lows[i+1:i+right+1]):
-            swings.append(SwingPoint(f"SL-{i}", i, df.iloc[i]["time"], SwingType.LOW, float(l), left + right))
+            swings.append(SwingPoint(f"SL-{i}", i, df.iloc[i]["time"], SwingType.LOW, float(l), strength=left + right, confirmation_index=i + right, confirmation_time=df.iloc[i + right]["time"]))
     return swings
 
 def build_liquidity_pools(swings: list[SwingPoint]) -> list[LiquidityPool]:
