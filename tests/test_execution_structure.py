@@ -49,8 +49,8 @@ def test_inducement_uses_directional_swing_after_order_block():
     ])
     blocks = find_order_blocks(x, [2])
     swings = [
-        SwingPoint("SL-3", 3, 4, SwingType.LOW, 101, 6),
-        SwingPoint("SH-3", 3, 4, SwingType.HIGH, 104, 6),
+        SwingPoint("SL-3", 3, 4, SwingType.LOW, 101, 6, 3, 4),
+        SwingPoint("SH-3", 3, 4, SwingType.HIGH, 104, 6, 3, 4),
     ]
     idms = find_inducements(x, blocks, swings)
     assert len(idms) == 1
