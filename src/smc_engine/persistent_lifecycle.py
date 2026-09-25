@@ -145,7 +145,7 @@ class PersistentLifecycleCoordinator:
         retcode = getattr(broker_result, "retcode", None)
         if retcode is None and isinstance(broker_result, dict):
             retcode = broker_result.get("retcode")
-        success_codes = {0}
+        success_codes = set()
         for name in ("TRADE_RETCODE_DONE", "TRADE_RETCODE_PLACED"):
             value = getattr(execution.mt5, name, None)
             if value is not None:
