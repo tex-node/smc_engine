@@ -16,14 +16,8 @@ class PersistentLifecycle:
     def transition(self, new_state: SetupState, event_time: object, reason: str) -> None:
         previous = self.lifecycle.state
         self.lifecycle.transition(new_state, reason)
-        self.store.upsert_setup(
+        self.store.persist_transition(
             self.lifecycle.setup,
-            self.lifecycle.state,
-            event_time,
-            reason=reason,
-        )
-        self.store.record_transition(
-            self.lifecycle.setup.id,
             previous,
             new_state,
             event_time,
