@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 from typing import Optional
 import pandas as pd
@@ -21,15 +20,20 @@ def find_swings(df: pd.DataFrame, left: int = 3, right: int = 3) -> list[SwingPo
         if h > max(highs[i-left:i]) and h >= max(highs[i+1:i+right+1]):
             swings.append(SwingPoint(f"SH-{i}", i, df.iloc[i]["time"], SwingType.HIGH, float(h), left + right, i + right, df.iloc[i + right]["time"]))
         if l < min(lows[i-left:i]) and l <= min(lows[i+1:i+right+1]):
-            swings.append(SwingPoint(f"SL-{i}", i, df.iloc[i]["time"], SwingType.LOW, float(l), strength=left + right, confirmation_index=i + right, confirmation_time=df.iloc[i + right]["time"]))
+            swings.append(SwingPoint(f"SL-{i}", i, df.iloc[i]["time"], SwingType.LOW, float(l), left + right, i + right, df.iloc[i + right]["time"]))
     return swings
 
 def build_liquidity_pools(swings: list[SwingPoint]) -> list[LiquidityPool]:
-    pools: list[LiquidityPool] = []
-    for s in swings:
-        side = LiquiditySide.BUY_SIDE if s.type is SwingType.HIGH else LiquiditySide.SELL_SIDE
-        pools.append(LiquidityPool(f"LQ-{s.id}", side, s.price, s.id, s.time))
-    return pools
+    return [
+        LiquidityPool(
+            f"LQ-{s.id}",
+            LiquiditySide.BUY_SIDE if s.type is SwingType.HIGH else LiquiditySide.SELL_SIDE,
+            s.price,
+            s.id,
+            s.time,
+        )
+        for s in swings
+    ]
 
 def detect_sweeps(df: pd.DataFrame, liquidity: list[LiquidityPool], lookback_bars: int = 20) -> list[LiquiditySweep]:
     """Detect wick-through and close-back sweeps of confirmed swings."""
@@ -54,14 +58,14 @@ def detect_sweeps(df: pd.DataFrame, liquidity: list[LiquidityPool], lookback_bar
     return sorted(sweeps, key=lambda x: x.candle_index)
 
 def detect_structure_breaks(df: pd.DataFrame, swings: list[SwingPoint], start_index: int = 0) -> list[StructureEvent]:
-    """Detect closes beyond the most recent confirmed swing level."""
+    """Detect closes beyond swings that were already confirmed at the break candle."""
     highs = [s for s in swings if s.type is SwingType.HIGH]
     lows = [s for s in swings if s.type is SwingType.LOW]
     events: list[StructureEvent] = []
     for i in range(max(start_index, 1), len(df)):
         row = df.iloc[i]
-        prior_highs = [s for s in highs if s.index < i]
-        prior_lows = [s for s in lows if s.index < i]
+        prior_highs = [s for s in highs if s.index < i and s.confirmation_index <= i]
+        prior_lows = [s for s in lows if s.index < i and s.confirmation_index <= i]
         previous_close = float(df.iloc[i - 1]["close"])
         if prior_highs:
             h = prior_highs[-1]
@@ -73,13 +77,8 @@ def detect_structure_breaks(df: pd.DataFrame, swings: list[SwingPoint], start_in
                 events.append(StructureEvent(f"BOS-L-{i}", StructureEventType.BOS, Direction.BEARISH, l.price, i, row["time"], l.id))
     return events
 
-def confirm_csd(
-    df: pd.DataFrame,
-    sweep: LiquiditySweep,
-    breaks: list[StructureEvent],
-    max_bars_after_sweep: int = 6,
-) -> Optional[StructureEvent]:
-    """Confirm a directional structure break within a bounded window after a sweep."""
+def confirm_csd(df: pd.DataFrame, sweep: LiquiditySweep, breaks: list[StructureEvent], max_bars_after_sweep: int = 6) -> Optional[StructureEvent]:
+    """Confirm the first opposite-direction break of pre-sweep confirmed structure."""
     desired = Direction.BULLISH if sweep.side is LiquiditySide.SELL_SIDE else Direction.BEARISH
     candidates = [
         b for b in breaks
