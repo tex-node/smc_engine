@@ -2,7 +2,10 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
-try:\n    import MetaTrader5 as mt5\nexcept ImportError:  # pure-analysis/CI environments\n    mt5 = None
+try:
+    import MetaTrader5 as mt5
+except ImportError:  # pure-analysis/CI environments
+    mt5 = None
 import pandas as pd
 
 @dataclass(frozen=True)
