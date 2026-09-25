@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
@@ -85,6 +84,17 @@ class POI:
 
     def contains(self, price: float, tolerance: float = 0.0) -> bool:
         return (self.low - tolerance) <= price <= (self.high + tolerance)
+
+@dataclass(frozen=True)
+class Inducement:
+    id: str
+    direction: Direction
+    candle_index: int
+    candle_time: object
+    level: float
+    source_swing_index: int
+    order_block_id: str
+    confirmation_time: object = None
 
 @dataclass
 class StructureState:
