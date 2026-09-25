@@ -51,6 +51,7 @@ class ReconciliationKind:
     BROKER_TICKET_MISMATCH = "BROKER_TICKET_MISMATCH"
     HISTORICAL_ORDER_FOUND = "HISTORICAL_ORDER_FOUND"
     BROKER_POSITION_RECOVERY_AVAILABLE = "BROKER_POSITION_RECOVERY_AVAILABLE"
+    BROKER_POSITION_TICKET_MISMATCH = "BROKER_POSITION_TICKET_MISMATCH"
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,7 @@ class ReconciliationResult:
     broker_state: Optional[SetupState] = None
     persisted_state: Optional[SetupState] = None
     ticket: Optional[int] = None
+    position_ticket: Optional[int] = None
     historical_order_state: Optional[int] = None
 
 
@@ -128,7 +130,12 @@ class PersistentLifecycleCoordinator:
                         ticket=record.ticket,
                     )
                 results.append(ReconciliationResult(ReconciliationKind.SUBMISSION_CONFIRMED, record.setup_id, record.state, row["state"], record.ticket))
-            elif row["state"] is record.state and row["ticket"] is not None and int(row["ticket"]) != int(record.ticket):
+            elif (
+                record.state is SetupState.ORDER_PLACED
+                and row["state"] is SetupState.ORDER_PLACED
+                and row["ticket"] is not None
+                and int(row["ticket"]) != int(record.ticket)
+            ):
                 results.append(ReconciliationResult(
                     ReconciliationKind.BROKER_TICKET_MISMATCH,
                     record.setup_id, record.state, row["state"], record.ticket,
@@ -137,14 +144,32 @@ class PersistentLifecycleCoordinator:
                 record.state is SetupState.POSITION_MANAGED
                 and row["state"] in {SetupState.ORDER_PLACED, SetupState.FILLED, SetupState.POSITION_MANAGED}
             ):
-                # MT5 position tickets are not guaranteed to equal the originating
-                # pending-order ticket. Identity/comment is the durable correlation
-                # key here; do not overwrite the persisted order ticket implicitly.
-                self.store.set_position_ticket(record.setup_id, record.ticket)
-                results.append(ReconciliationResult(
-                    ReconciliationKind.BROKER_POSITION_RECOVERY_AVAILABLE,
-                    record.setup_id, record.state, row["state"], record.ticket,
-                ))
+                persisted_position_ticket = row["position_ticket"]
+                if (
+                    persisted_position_ticket is not None
+                    and int(persisted_position_ticket) != int(record.ticket)
+                ):
+                    results.append(ReconciliationResult(
+                        ReconciliationKind.BROKER_POSITION_TICKET_MISMATCH,
+                        record.setup_id,
+                        record.state,
+                        row["state"],
+                        row["ticket"],
+                        position_ticket=record.ticket,
+                    ))
+                else:
+                    # MT5 position tickets are not guaranteed to equal the
+                    # originating pending-order ticket. Identity/comment is the
+                    # durable correlation key; startup reconciliation must not
+                    # silently rewrite a previously established position identity.
+                    results.append(ReconciliationResult(
+                        ReconciliationKind.BROKER_POSITION_RECOVERY_AVAILABLE,
+                        record.setup_id,
+                        record.state,
+                        row["state"],
+                        row["ticket"],
+                        position_ticket=record.ticket,
+                    ))
             elif row["state"] is record.state:
                 results.append(ReconciliationResult(
                     ReconciliationKind.BROKER_ACTIVE_MATCH,
