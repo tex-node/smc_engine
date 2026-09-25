@@ -59,6 +59,7 @@ class ReconciliationResult:
     broker_state: Optional[SetupState] = None
     persisted_state: Optional[SetupState] = None
     ticket: Optional[int] = None
+    historical_order_state: Optional[int] = None
 
 
 class PersistentLifecycleCoordinator:
@@ -238,13 +239,15 @@ class PersistentLifecycleCoordinator:
                 None,
                 row["state"],
                 historical_ticket,
+                getattr(history, "state", None),
             )
         return ReconciliationResult(
             ReconciliationKind.HISTORICAL_ORDER_FOUND,
             setup_id,
             None,
             row["state"],
-            int(getattr(history, "ticket", ticket)),
+            historical_ticket,
+            getattr(history, "state", None),
         )
 
     def can_accept_new_setup(self, symbol: str) -> bool:
