@@ -92,7 +92,7 @@ class CausalMTFAnalyzer:
         ]
         blocks = find_order_blocks(m15_work, displacement_indices, "M15", self.config.m15_ob_search_back)
         swings15 = find_swings(m15_view, self.config.m15_swing_left, self.config.m15_swing_right)
-        idms = find_inducements(m15_view, blocks, swings15, self.config.m15_idm_window)
+
 
         candidates = []
         for poi in pois:
@@ -152,7 +152,7 @@ class CausalMTFAnalyzer:
                     try:
                         setup = build_trade_setup(
                             self.symbol, context, sweep, csd, irl,
-                            risk_percent=self.config.risk_percent,
+                            risk_percent=self.config.risk_percent,\n                            created_time=event_time,
                         )
                     except ValueError:
                         continue
