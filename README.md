@@ -1,4 +1,6 @@
-# SMC Engine — Varis The Trader 3-Layer Automated Trading Pipeline
+# SMC Engine — Causal Multi-Timeframe SMC Analyzer
+
+A Python market-analysis and execution-boundary library for Smart Money Concepts (SMC) on MetaTrader 5. The current refactor treats Python as the SMC brain and MT5 as the market-data/execution gateway. The legacy `varis_smc_bot.py` is retained for reference and is not the source of truth for the new architecture.
 
 A Python-based automated trading system implementing Smart Money Concepts (SMC)
 market structure methodology (per Varis The Trader) on MetaTrader 5, using the
@@ -95,7 +97,7 @@ The branch refactor/market-structure-foundation introduces the first production-
 - pytest fixtures for swing/sweep/CSD behavior
 - package metadata for a src/ layout
 
-This is deliberately additive. The existing varis_smc_bot.py remains untouched until the new primitives are validated against historical replay and then wired into the strategy state machine.
+The refactor is now the source of truth for the new analysis pipeline. `varis_smc_bot.py` is legacy and should not be used as the architectural reference.
 
 ### Next implementation sequence
 
@@ -307,3 +309,55 @@ The polling boundary now supports startup reconciliation and refuses to accept a
 - an active broker identity exists in MT5.
 
 Lifecycle transitions can be persisted together with transition history. This establishes the restart-safe coordination boundary before execution is enabled.
+
+
+### Current architecture
+
+```
+MT5 closed candles
+      ↓
+Market Data Adapter
+      ↓
+Causal MTF Analyzer
+      ↓
+D1 POI → H4 Sweep/CSD → M15 OB/IDM/IRL
+      ↓
+TradeSetup
+      ↓
+Risk / Execution Boundary
+      ↓
+Dry Run / Replay / MT5 preflight
+```
+
+The critical contract is that a setup is only allowed to reference information that was available at its confirmation timestamp. Historical replay and `as_of` analysis are therefore first-class engineering paths.
+
+### Persistence and restart reconciliation
+
+SQLite stores strategy provenance and lifecycle history. MT5 remains authoritative for live broker state.
+
+Startup reconciliation explicitly classifies:
+
+- `BROKER_ACTIVE_MATCH`
+- `BROKER_ACTIVE_UNKNOWN`
+- `PERSISTED_MISSING_BROKER`
+- `STATE_MISMATCH`
+
+Ambiguous states are surfaced for operator resolution; reconciliation does not silently cancel or modify broker orders.
+
+The persistence layer uses SQLite WAL mode, a busy timeout, schema metadata, indexes, enum-safe setup serialization, and atomic lifecycle-state/event writes.
+
+### Validation status
+
+The repository has automated pytest coverage for the structure engine, POI lifecycle, execution structure, causal chronology, risk sizing, MT5 request construction, replay, dry-run orchestration, polling, persistence and restart reconciliation.
+
+CI runs the suite on Python 3.11. A green CI result validates the software tests; it is not evidence of trading profitability or live-market performance.
+
+### Recommended deployment progression
+
+1. Historical fixtures and replay.
+2. Read-only MT5 analyzer.
+3. Live dry-run with broker risk validation.
+4. Operator-reviewed preflight.
+5. Only after independent validation, consider enabling live execution.
+
+Live execution should remain separately gated from analysis so an SMC detection bug cannot directly become an unattended transaction.
