@@ -46,3 +46,21 @@ def test_setup_store_round_trip(tmp_path: Path):
     assert len(store.active("EURAUD")) == 1
 
     store.close()
+
+
+def test_persist_transition_is_atomic_and_enum_safe(tmp_path: Path):
+    store = SetupStore(tmp_path / "state.sqlite3")
+    setup = make_setup()
+    store.persist_transition(
+        setup,
+        SetupState.EXECUTION_READY,
+        SetupState.ORDER_PREFLIGHTED,
+        "2026-01-01T00:02:00Z",
+        "preflight ok",
+        ticket=123,
+    )
+    saved = store.get(setup.id)
+    assert saved["state"] is SetupState.ORDER_PREFLIGHTED
+    assert saved["setup_json"]["direction"] == "BULLISH"
+    assert saved["ticket"] == 123
+    store.close()
