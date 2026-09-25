@@ -153,3 +153,23 @@ The strategy boundary now includes:
 - reward/risk distance and R:R calculations
 
 The setup contract is still analysis-only. MT5 risk sizing and order validation remain a separate execution concern.
+
+
+### Phase 6 — Risk and MT5 execution boundary
+
+Added `src/smc_engine/risk.py`, `src/smc_engine/execution.py`, and tests.
+
+The new execution boundary now provides:
+
+- broker-aware risk sizing from tick size/value
+- volume-step flooring
+- rejection when broker minimum volume would exceed requested risk
+- stop/freeze distance validation
+- pending BUY_LIMIT / SELL_LIMIT validation against live bid/ask
+- typed pending-order request
+- MT5 request translation
+- explicit `order_check()` preflight
+- separate `order_send()` execution call
+- preserved magic number 202609
+
+The legacy live bot is still isolated. The new adapter is intentionally not wired into live execution until replay/integration validation is complete.
