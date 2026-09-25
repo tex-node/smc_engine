@@ -194,3 +194,21 @@ States include:
 and explicit invalidation/rejection states for POI, OB, protected-level, entry, risk and broker failures.
 
 `SetupRegistry` provides in-process setup deduplication by setup ID and symbol. Persistence can replace the registry later without changing the state-machine contract.
+
+
+### Phase 8 — Historical replay boundary
+
+Added `src/smc_engine/replay.py` and `tests/test_replay.py`.
+
+The same `TradeSetup` contract can now be evaluated without MT5 using a deterministic candle-level pending-order simulator.
+
+Replay behavior includes:
+
+- pending limit fill detection
+- protected-level invalidation before fill
+- SL/TP handling after fill
+- conservative same-candle ambiguity handling (SL resolves before TP)
+- per-setup replay results
+- aggregate setup/fill/target/stop/invalidation metrics
+
+This is an engineering validation harness, not a claim of trading performance. Tick-level replay can be added later where broker/tick history is available.
