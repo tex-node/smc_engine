@@ -66,7 +66,7 @@ def find_inducements(df: pd.DataFrame, order_blocks: list[OrderBlock], swings, m
     for ob in order_blocks:
         eligible = []
         for s in swings:
-            if not (ob.candle_index < s.index <= ob.source_displacement_index + max_bars_after_ob):
+            if not (ob.candle_index < s.index <= ob.candle_index + max_bars_after_ob):
                 continue
             confirmation_time = getattr(s, 'confirmation_time', s.time)
             if cutoff is not None:
