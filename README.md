@@ -254,3 +254,16 @@ Added `tests/test_integration_fixture.py`.
 The test suite now contains a multi-timeframe synthetic market specimen covering the intended causal sequence from D1 displacement through H4 sweep/CSD and post-CSD M15 execution structure, plus replay consumption of any resulting candidate.
 
 The fixture is an engineering regression specimen, not market-performance evidence.
+
+
+### Phase 13 — Read-only production dry run
+
+Added `src/smc_engine/dry_run.py`.
+
+The orchestration boundary now supports:
+
+MT5 closed candles → causal strategy → TradeSetup → broker-aware risk validation → dry-run order intent.
+
+No `order_send()` is called by this path. A successful dry run reports entry, SL, TP, calculated volume and estimated monetary loss; rejected setups report the risk validation reason.
+
+This is the intended first live-market validation mode before enabling execution.
