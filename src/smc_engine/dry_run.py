@@ -7,7 +7,7 @@ from typing import Optional
 from .analyzer import MT5Analyzer, LiveAnalysis
 from .execution import MT5ExecutionAdapter, PendingOrderRequest
 from .lifecycle import SetupState
-from .market import MT5MarketData
+from .market import MT5MarketData\nfrom .order_guard import MT5OrderGuard
 from .risk import RiskEngine
 
 
@@ -41,7 +41,7 @@ class DryRunEngine:
         self.market = market
         self.analyzer = analyzer
         self.risk = risk
-        self.execution = execution
+        self.execution = execution\n        self.order_guard = order_guard
 
     def run_once(self, balance: float) -> DryRunReport:
         result: LiveAnalysis = self.analyzer.analyze_once()
