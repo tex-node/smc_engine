@@ -151,6 +151,9 @@ class PersistentLifecycleCoordinator:
             if value is not None:
                 success_codes.add(value)
         if retcode not in success_codes:
+            ambiguous_codes = {x for x in (getattr(execution.mt5, "TRADE_RETCODE_REQUOTE", None), getattr(execution.mt5, "TRADE_RETCODE_TIMEOUT", None), getattr(execution.mt5, "TRADE_RETCODE_CONNECTION", None)) if x is not None}
+            if retcode in ambiguous_codes:
+                return SubmissionResult(SetupState.ORDER_SUBMITTING, broker_result=broker_result, ambiguous=True)
             PersistentLifecycle(lifecycle, self.store).transition(SetupState.BROKER_REJECTED, event_time, f"broker rejected pending order retcode={retcode}")
             return SubmissionResult(SetupState.BROKER_REJECTED, broker_result=broker_result)
         ticket = None
