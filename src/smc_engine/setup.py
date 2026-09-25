@@ -16,6 +16,7 @@ class IRLTarget:
     price: float
     candle_index: int
     candle_time: object
+    confirmation_time: object
 
 
 def find_irl_target(
