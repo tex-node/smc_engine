@@ -75,8 +75,8 @@ class SetupStore:
     def _upsert_setup_no_commit(self, setup, state, updated_time, ticket=None, reason=None, position_ticket=None):
         self._conn.execute(
             """INSERT INTO setups
-              (setup_id,symbol,state,created_time,updated_time,ticket,setup_json,reason)
-            VALUES (?,?,?,?,?,?,?,?)
+              (setup_id,symbol,state,created_time,updated_time,ticket,position_ticket,setup_json,reason)
+            VALUES (?,?,?,?,?,?,?,?,?)
             ON CONFLICT(setup_id) DO UPDATE SET
               state=excluded.state,
               updated_time=excluded.updated_time,
@@ -85,7 +85,7 @@ class SetupStore:
               setup_json=excluded.setup_json,
               reason=excluded.reason""",
             (setup.id, setup.symbol, state.value, str(setup.created_time),
-             str(updated_time), ticket, self._setup_payload(setup), reason),
+             str(updated_time), ticket, position_ticket, self._setup_payload(setup), reason),
         )
 
     def upsert_setup(self, setup, state, updated_time, ticket: Optional[int] = None, reason: Optional[str] = None) -> None:
