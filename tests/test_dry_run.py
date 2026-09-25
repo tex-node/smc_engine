@@ -13,3 +13,15 @@ class FakeMarket:
 class FakeAnalyzer:
     def __init__(self, candidate=None):
         self.candidate = candidate
+
+
+class FakeGuard:
+    def __init__(self, active=False, valid=True):
+        self.active = active
+        self.valid = valid
+
+    def has_active_identity(self, setup):
+        return self.active
+
+    def setup_is_still_valid(self, setup, bid, ask):
+        return self.valid
