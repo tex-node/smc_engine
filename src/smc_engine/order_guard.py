@@ -64,14 +64,8 @@ class MT5OrderGuard:
         ask: float,
     ) -> bool:
         if setup.direction is Direction.BULLISH:
-            return (
-                setup.entry < ask
-                and bid > setup.invalidation_level
-            )
-        return (
-            setup.entry > bid
-            and ask < setup.invalidation_level
-        )
+            return bid > setup.invalidation_level
+        return ask < setup.invalidation_level
 
     def cancel_pending(self, ticket: int) -> Any:
         request = {
