@@ -1,0 +1,213 @@
+import time
+import MetaTrader5 as mt5
+import pandas as pd
+import numpy as np
+from datetime import datetime
+from typing import Dict, Optional
+
+# ==========================================
+# 1. MT5 CONNECTOR CLASS
+# ==========================================
+class MT5Connector:
+    def __init__(self, symbol: str = "EURAUD"):
+        self.symbol = symbol
+
+    def initialize(self) -> bool:
+        if not mt5.initialize():
+            print(f"[{datetime.now()}] MT5 Initialization failed. Error: {mt5.last_error()}")
+            return False
+        
+        if not mt5.symbol_select(self.symbol, True):
+            print(f"[{datetime.now()}] Failed to select {self.symbol} in Market Watch.")
+            return False
+            
+        print(f"[{datetime.now()}] Successfully connected to MT5 Terminal for {self.symbol}")
+        return True
+
+    def get_rates(self, timeframe, count: int = 100) -> pd.DataFrame:
+        rates = mt5.copy_rates_from_pos(self.symbol, timeframe, 0, count)
+        if rates is None or len(rates) == 0:
+            raise ValueError(f"Failed to fetch rates for timeframe {timeframe}")
+        
+        df = pd.DataFrame(rates)
+        df['time'] = pd.to_datetime(df['time'], unit='s')
+        return df[['time', 'open', 'high', 'low', 'close', 'tick_volume']]
+
+    def place_limit_order(self, order_type: str, price: float, sl: float, tp: float, volume: float = 0.1):
+        type_flag = mt5.ORDER_TYPE_BUY_LIMIT if order_type == "BUY_LIMIT" else mt5.ORDER_TYPE_SELL_LIMIT
+        
+        request = {
+            "action": mt5.TRADE_ACTION_PENDING,
+            "symbol": self.symbol,
+            "volume": volume,
+            "type": type_flag,
+            "price": round(price, 5),
+            "sl": round(sl, 5),
+            "tp": round(tp, 5),
+            "deviation": 10,
+            "magic": 202609,
+            "comment": "Varis SMC Bot",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+
+        result = mt5.order_send(request)
+        if result.retcode != mt5.TRADE_RETCODE_DONE:
+            print(f"[{datetime.now()}] Order Placement Failed! Code: {result.retcode}, Comment: {result.comment}")
+        else:
+            print(f"[{datetime.now()}] PENDING ORDER PLACED! Ticket: {result.order} | Type: {order_type} | Price: {price} | SL: {sl} | TP: {tp}")
+
+    def shutdown(self):
+        mt5.shutdown()
+
+# ==========================================
+# 2. VARIS SMC ENGINE CLASS
+# ==========================================
+class VarisSMCEngine:
+    def __init__(self, atr_period: int = 14, displacement_mult: float = 1.5):
+        self.atr_period = atr_period
+        self.displacement_mult = displacement_mult
+
+    def _calc_atr(self, df: pd.DataFrame) -> pd.Series:
+        high_low = df['high'] - df['low']
+        high_close = np.abs(df['high'] - df['close'].shift())
+        low_close = np.abs(df['low'] - df['close'].shift())
+        ranges = pd.concat([high_low, high_close, low_close], axis=1)
+        return np.max(ranges, axis=1).rolling(self.atr_period).mean()
+
+    def check_macro_context(self, df_daily: pd.DataFrame) -> Dict[str, bool]:
+        """Layer 1: Daily timeframe / 60-90 day window filter."""
+        df_90d = df_daily.tail(90).copy()
+        df_90d['atr'] = self._calc_atr(df_90d)
+        df_90d['body'] = np.abs(df_90d['close'] - df_90d['open'])
+        df_90d['is_displacement'] = df_90d['body'] > (df_90d['atr'] * self.displacement_mult)
+
+        latest_close = df_90d['close'].iloc[-1]
+        demand_zones = df_90d[df_90d['is_displacement'] & (df_90d['close'] > df_90d['open'])]
+        supply_zones = df_90d[df_90d['is_displacement'] & (df_90d['close'] < df_90d['open'])]
+
+        at_demand = False
+        at_supply = False
+
+        if not demand_zones.empty:
+            last_demand_low = demand_zones['low'].iloc[-1]
+            last_demand_high = demand_zones['high'].iloc[-1]
+            if last_demand_low <= latest_close <= (last_demand_high * 1.002):
+                at_demand = True
+
+        if not supply_zones.empty:
+            last_supply_low = supply_zones['low'].iloc[-1]
+            last_supply_high = supply_zones['high'].iloc[-1]
+            if (last_supply_low * 0.998) <= latest_close <= last_supply_high:
+                at_supply = True
+
+        return {"at_demand": at_demand, "at_supply": at_supply}
+
+    def check_reversal_csd(self, df_4h: pd.DataFrame, bias: str) -> Optional[Dict]:
+        """Layer 2: 4H Liquidity Sweep & CSD confirmation."""
+        df_4h = df_4h.copy()
+        swing_lo = df_4h['low'].rolling(10).min().shift(1)
+        swing_hi = df_4h['high'].rolling(10).max().shift(1)
+
+        for i in range(len(df_4h) - 8, len(df_4h) - 1):
+            row = df_4h.iloc[i]
+            
+            if bias == "BULLISH":
+                if (row['low'] < swing_lo.iloc[i]) and (row['close'] > swing_lo.iloc[i]):
+                    csd_target = row['high']
+                    for j in range(i + 1, len(df_4h)):
+                        if df_4h.iloc[j]['close'] > csd_target:
+                            return {"status": "CONFIRMED", "protected_level": row['low'], "direction": "BUY"}
+
+            elif bias == "BEARISH":
+                if (row['high'] > swing_hi.iloc[i]) and (row['close'] < swing_hi.iloc[i]):
+                    csd_target = row['low']
+                    for j in range(i + 1, len(df_4h)):
+                        if df_4h.iloc[j]['close'] < csd_target:
+                            return {"status": "CONFIRMED", "protected_level": row['high'], "direction": "SELL"}
+
+        return None
+
+    def evaluate_execution(self, df_15m: pd.DataFrame, csd_info: Dict) -> Optional[Dict]:
+        """Layer 3: 15m Inducement & Internal Range Liquidity targeting."""
+        recent = df_15m.tail(15)
+        direction = csd_info['direction']
+        
+        if direction == "BUY":
+            entry = recent['low'].min()
+            sl = csd_info['protected_level']
+            tp = recent['high'].rolling(5).max().iloc[-1] # Internal Range Liquidity
+            
+            if entry > sl and tp > entry:
+                return {"type": "BUY_LIMIT", "entry": entry, "sl": sl, "tp": tp}
+
+        elif direction == "SELL":
+            entry = recent['high'].max()
+            sl = csd_info['protected_level']
+            tp = recent['low'].rolling(5).min().iloc[-1] # Internal Range Liquidity
+            
+            if entry < sl and tp < entry:
+                return {"type": "SELL_LIMIT", "entry": entry, "sl": sl, "tp": tp}
+
+        return None
+
+# ==========================================
+# 3. MAIN RUNNABLE EXECUTION LOOP
+# ==========================================
+def main():
+    SYMBOL = "EURAUD"
+    LOT_SIZE = 0.1
+    POLL_INTERVAL_SECONDS = 60 # Check every minute
+
+    connector = MT5Connector(symbol=SYMBOL)
+    engine = VarisSMCEngine()
+
+    if not connector.initialize():
+        return
+
+    print(f"[{datetime.now()}] Starting Varis SMC Automated Live Scanner...")
+
+    try:
+        while True:
+            # Fetch Multi-Timeframe Data
+            df_daily = connector.get_rates(mt5.TIMEFRAME_D1, count=100)
+            df_4h    = connector.get_rates(mt5.TIMEFRAME_H4, count=100)
+            df_15m   = connector.get_rates(mt5.TIMEFRAME_M15, count=100)
+
+            # Layer 1: Macro Context
+            context = engine.check_macro_context(df_daily)
+            
+            bias = None
+            if context['at_demand']:
+                bias = "BULLISH"
+            elif context['at_supply']:
+                bias = "BEARISH"
+
+            if bias:
+                print(f"[{datetime.now()}] HTF Context Active: {bias} Bias detected.")
+                
+                # Layer 2: Reversal & CSD
+                csd_result = engine.check_reversal_csd(df_4h, bias)
+                if csd_result:
+                    print(f"[{datetime.now()}] 4H CSD Confirmed! Protected Level: {csd_result['protected_level']}")
+                    
+                    # Layer 3: Execution & Order Placement
+                    setup = engine.evaluate_execution(df_15m, csd_result)
+                    if setup:
+                        connector.place_limit_order(
+                            order_type=setup['type'],
+                            price=setup['entry'],
+                            sl=setup['sl'],
+                            tp=setup['tp'],
+                            volume=LOT_SIZE
+                        )
+            
+            time.sleep(POLL_INTERVAL_SECONDS)
+
+    except KeyboardInterrupt:
+        print(f"\n[{datetime.now()}] Bot stopped manually.")
+    finally:
+        connector.shutdown()
+
+if __name__ == "__main__":
+    main()

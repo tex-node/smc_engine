@@ -1,0 +1,70 @@
+# SMC Engine — Varis The Trader 3-Layer Automated Trading Pipeline
+
+A Python-based automated trading system implementing Smart Money Concepts (SMC)
+market structure methodology (per Varis The Trader) on MetaTrader 5, using the
+official `MetaTrader5` Python library.
+
+> **Risk warning:** This bot places real pending orders on a live MT5 account.
+> Test on a demo account first. Trading CFDs/forex carries significant risk of loss.
+
+## Architecture
+
+The pipeline is a strict 3-layer confluence model. No layer is traded in isolation:
+
+| Layer | Timeframe | Purpose |
+|-------|-----------|---------|
+| 1. Macro Context | Daily (60–90 day window) | Unmitigated Demand/Supply zones created by displacement candles (body > 1.5x ATR-14). Price must be touching/sweeping an HTF POI. |
+| 2. Reversal & CSD | 4-Hour | Liquidity sweep detection (wick through a prior swing, close back inside) + Change in State of Delivery (full body close beyond the sweep impulse point). Sweep extreme = Protected High/Low. |
+| 3. Execution | 15-Minute | Inducement (IDM) at/near the 15m Order Block. Limit order at OB mitigation; SL beyond Protected High/Low; TP at Internal Range Liquidity (IRL). |
+
+Execution rules:
+- Pending limit orders only — never market orders.
+- SL and TP are attached at order placement time.
+- Continuous monitoring loop on closed 15m candles (poll interval configurable).
+
+## Repository Layout
+
+```
+smc_engine/
+├── varis_smc_bot.py    # Full implementation: MT5Connector, VarisSMCEngine, main loop
+├── SYSTEM_PROMPT.md    # Agent scope / operating specification
+├── requirements.txt    # Python dependencies
+└── README.md
+```
+
+## Setup & Execution
+
+### 1. Environment requirements
+- **Windows OS** (Windows 10/11 or Windows VPS) — required for native MT5 IPC.
+- **Python 3.10+** — check "Add Python to PATH" during installation.
+- **MetaTrader 5 terminal** — downloaded from your broker (e.g., IC Markets, Exness, Deriv).
+
+### 2. Configure MT5 Terminal
+1. Open MetaTrader 5 and log into your broker account.
+2. Go to **Tools → Options → Expert Advisors**.
+3. Check **Allow Algo Trading**.
+4. Ensure the traded pair (e.g., `EURAUD`) is added to Market Watch (`Ctrl + M`).
+
+### 3. Install Python dependencies
+```powershell
+pip install -r requirements.txt
+```
+(or directly: `pip install MetaTrader5 pandas numpy`)
+
+### 4. Run the bot
+```powershell
+python varis_smc_bot.py
+```
+
+## Configuration
+
+Defaults are set at the top of `main()` in `varis_smc_bot.py`:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `SYMBOL` | `EURAUD` | Traded instrument |
+| `LOT_SIZE` | `0.1` | Pending order volume |
+| `POLL_INTERVAL_SECONDS` | `60` | Scanner loop interval |
+| `atr_period` | `14` | ATR period for displacement filter |
+| `displacement_mult` | `1.5` | Candle body multiple of ATR to qualify as displacement |
+| `magic` | `202609` | Order magic number for tracking bot orders |
