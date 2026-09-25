@@ -7,7 +7,7 @@ from src.smc_engine.setup import build_trade_setup, find_irl_target
 
 
 def swing(i, typ, price):
-    return SwingPoint(f"S-{i}", i, i, typ, price, 6)
+    return SwingPoint(f"S-{i}", i, i, typ, price, 6, i, i)
 
 
 def test_bullish_irl_is_nearest_unmitigated_high_above_entry():
