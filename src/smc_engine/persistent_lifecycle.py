@@ -277,7 +277,7 @@ class PersistentLifecycleCoordinator:
                 None,
                 row["state"],
                 historical_ticket,
-                getattr(history, "state", None),
+                historical_order_state=getattr(history, "state", None),
             )
         return ReconciliationResult(
             ReconciliationKind.HISTORICAL_ORDER_FOUND,
@@ -285,7 +285,7 @@ class PersistentLifecycleCoordinator:
             None,
             row["state"],
             historical_ticket,
-            getattr(history, "state", None),
+            historical_order_state=getattr(history, "state", None),
         )
 
     def recover_position(self, setup_id: str, symbol: str, event_time: object) -> ReconciliationResult:
