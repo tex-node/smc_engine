@@ -6,7 +6,7 @@ from typing import Optional
 
 from .analyzer import MT5Analyzer, LiveAnalysis
 from .execution import MT5ExecutionAdapter, PendingOrderRequest
-from .lifecycle import SetupLifecycle, SetupRegistry, SetupState
+from .lifecycle import SetupState
 from .market import MT5MarketData
 from .risk import RiskEngine
 
