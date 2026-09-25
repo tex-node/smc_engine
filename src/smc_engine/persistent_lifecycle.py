@@ -39,6 +39,7 @@ class ReconciliationKind:
     BROKER_ACTIVE_UNKNOWN = "BROKER_ACTIVE_UNKNOWN"
     PERSISTED_MISSING_BROKER = "PERSISTED_MISSING_BROKER"
     STATE_MISMATCH = "STATE_MISMATCH"
+    SUBMISSION_CONFIRMED = "SUBMISSION_CONFIRMED"
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,13 @@ class PersistentLifecycleCoordinator:
                     ReconciliationKind.BROKER_ACTIVE_UNKNOWN,
                     record.setup_id, record.state, None, record.ticket,
                 ))
+            elif row["state"] is SetupState.ORDER_SUBMITTING and record.state is SetupState.ORDER_PLACED:
+                lifecycle = self.registry.get(record.setup_id)
+                if lifecycle is not None:
+                    previous = lifecycle.state
+                    lifecycle.transition(SetupState.ORDER_PLACED, "startup reconciliation confirmed broker submission")
+                    self.store.persist_transition(lifecycle.setup, previous, SetupState.ORDER_PLACED, row["updated_time"], "startup reconciliation confirmed broker submission", ticket=record.ticket)
+                results.append(ReconciliationResult(ReconciliationKind.SUBMISSION_CONFIRMED, record.setup_id, record.state, row["state"], record.ticket))
             elif row["state"] is record.state:
                 results.append(ReconciliationResult(
                     ReconciliationKind.BROKER_ACTIVE_MATCH,
