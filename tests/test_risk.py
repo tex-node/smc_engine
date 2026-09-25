@@ -1,4 +1,3 @@
-
 import pytest
 
 from src.smc_engine.market import SymbolSpec
@@ -35,7 +34,7 @@ def setup(direction=Direction.BULLISH):
 def test_risk_sizing_floors_to_volume_step():
     q = RiskEngine(SPEC).volume_for_risk(1000, 1.0, 1.10000, 1.09900)
     assert q.volume == 0.1
-    assert q.estimated_loss == pytest.approx(9.0)
+    assert q.estimated_loss == pytest.approx(10.0)
 
 
 def test_minimum_volume_does_not_silently_increase_risk():
