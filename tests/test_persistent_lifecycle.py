@@ -146,6 +146,54 @@ def make_setup():
     )
 
 
+
+def test_reconcile_rejects_conflicting_broker_order_symbol(tmp_path: Path):
+    store = SetupStore(tmp_path / "state.sqlite3")
+    mt5 = FakeMT5()
+    mt5.orders = [
+        SimpleNamespace(
+            ticket=99,
+            magic=202609,
+            symbol="GBPUSD",
+            comment="SMC SETUP-EURAUD-1-OB",
+        )
+    ]
+    registry = SetupRegistry()
+    reconciler = MT5LifecycleReconciler(mt5, 202609, registry)
+
+    try:
+        reconciler.reconcile("EURAUD")
+    except RuntimeError as exc:
+        assert "GBPUSD" in str(exc)
+        assert "EURAUD" in str(exc)
+    else:
+        raise AssertionError("Expected conflicting broker symbol to be rejected")
+    store.close()
+
+
+def test_reconcile_rejects_conflicting_broker_position_symbol(tmp_path: Path):
+    store = SetupStore(tmp_path / "state.sqlite3")
+    mt5 = FakeMT5()
+    mt5.positions_ = [
+        SimpleNamespace(
+            ticket=99,
+            magic=202609,
+            symbol="GBPUSD",
+            comment="SMC SETUP-EURAUD-1-OB",
+        )
+    ]
+    registry = SetupRegistry()
+    reconciler = MT5LifecycleReconciler(mt5, 202609, registry)
+
+    try:
+        reconciler.reconcile("EURAUD")
+    except RuntimeError as exc:
+        assert "GBPUSD" in str(exc)
+        assert "EURAUD" in str(exc)
+    else:
+        raise AssertionError("Expected conflicting broker symbol to be rejected")
+    store.close()
+
 def test_new_setup_blocked_when_persisted_state_exists(tmp_path: Path):
     store = SetupStore(tmp_path / "state.sqlite3")
     mt5 = FakeMT5()
