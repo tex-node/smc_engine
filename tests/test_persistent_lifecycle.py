@@ -84,6 +84,10 @@ def test_reconcile_classifies_match_mismatch_and_missing(tmp_path: Path):
     result = coordinator.startup_reconcile("EURAUD")
     assert result[0].kind == ReconciliationKind.BROKER_ACTIVE_MATCH
 
+    store.upsert_setup(setup, SetupState.FILLED, "2026-01-01T00:02:00Z", ticket=12)
+    result = coordinator.startup_reconcile("EURAUD")
+    assert result[0].kind == ReconciliationKind.STATE_MISMATCH
+
     mt5.orders = []
     result = coordinator.startup_reconcile("EURAUD")
     assert result[0].kind == ReconciliationKind.PERSISTED_MISSING_BROKER
