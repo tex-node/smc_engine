@@ -49,6 +49,7 @@ class ReconciliationKind:
     SUBMISSION_CONFIRMED = "SUBMISSION_CONFIRMED"
     BROKER_IDENTITY_CONFLICT = "BROKER_IDENTITY_CONFLICT"
     BROKER_TICKET_MISMATCH = "BROKER_TICKET_MISMATCH"
+    HISTORICAL_ORDER_FOUND = "HISTORICAL_ORDER_FOUND"
 
 
 @dataclass(frozen=True)
@@ -203,6 +204,40 @@ class PersistentLifecycleCoordinator:
             ticket=int(ticket),
         )
         return SubmissionResult(SetupState.ORDER_PLACED, broker_result=broker_result, ticket=int(ticket))
+
+    def resolve_missing_broker_order(self, setup_id: str, symbol: str) -> ReconciliationResult:
+        """Inspect known broker history without changing lifecycle state."""
+        row = self.store.get(setup_id)
+        if row is None or row["symbol"] != symbol:
+            raise ValueError(f"Unknown persisted setup: {setup_id}")
+        ticket = row["ticket"]
+        if ticket is None:
+            raise ValueError(f"Setup {setup_id} has no persisted broker ticket")
+        history = self.reconciler.history_order(int(ticket))
+        if history is None:
+            return ReconciliationResult(
+                ReconciliationKind.PERSISTED_MISSING_BROKER,
+                setup_id,
+                None,
+                row["state"],
+                ticket,
+            )
+        historical_setup_id = self.reconciler._setup_id(getattr(history, "comment", ""))
+        if historical_setup_id != setup_id:
+            return ReconciliationResult(
+                ReconciliationKind.BROKER_TICKET_MISMATCH,
+                setup_id,
+                None,
+                row["state"],
+                int(getattr(history, "ticket", ticket)),
+            )
+        return ReconciliationResult(
+            ReconciliationKind.HISTORICAL_ORDER_FOUND,
+            setup_id,
+            None,
+            row["state"],
+            int(getattr(history, "ticket", ticket)),
+        )
 
     def can_accept_new_setup(self, symbol: str) -> bool:
         broker_ids = self.reconciler.active_setup_ids(symbol)
