@@ -80,3 +80,6 @@ class MT5LifecycleReconciler:
 
     def active_setup_ids(self, symbol: str) -> set[str]:
         return {r.setup_id for r in self.reconcile(symbol)}
+
+    def find_setup(self, symbol: str, setup_id: str) -> list[BrokerLifecycleRecord]:
+        return [r for r in self.reconcile(symbol) if r.setup_id == setup_id]
