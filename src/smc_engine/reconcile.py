@@ -38,7 +38,7 @@ class MT5LifecycleReconciler:
         for order in orders:
             if getattr(order, "magic", None) != self.magic:
                 continue
-            setup_id = self._setup_id(getattr(order, "comment", "")) or self._unknown_setup_id("ORDER", int(order.ticket))
+            setup_id = self.setup_id_from_comment(getattr(order, "comment", "")) or self._unknown_setup_id("ORDER", int(order.ticket))
             records.append(
                     BrokerLifecycleRecord(
                         ticket=int(order.ticket),
@@ -53,7 +53,7 @@ class MT5LifecycleReconciler:
         for position in positions:
             if getattr(position, "magic", None) != self.magic:
                 continue
-            setup_id = self._setup_id(getattr(position, "comment", "")) or self._unknown_setup_id("POSITION", int(position.ticket))
+            setup_id = self.setup_id_from_comment(getattr(position, "comment", "")) or self._unknown_setup_id("POSITION", int(position.ticket))
             records.append(
                     BrokerLifecycleRecord(
                         ticket=int(position.ticket),
@@ -72,11 +72,15 @@ class MT5LifecycleReconciler:
         return f"BROKER-UNKNOWN-{kind}-{ticket}"
 
     @staticmethod
-    def _setup_id(comment: str) -> str | None:
+    def setup_id_from_comment(comment: str) -> str | None:
         marker = "SETUP-"
         text = str(comment)
         start = text.find(marker)
         return text[start:].split()[0] if start >= 0 else None
+
+    @classmethod
+    def _setup_id(cls, comment: str) -> str | None:
+        return cls.setup_id_from_comment(comment)
 
     def active_setup_ids(self, symbol: str) -> set[str]:
         return {r.setup_id for r in self.reconcile(symbol)}
