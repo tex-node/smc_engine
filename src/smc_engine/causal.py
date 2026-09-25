@@ -95,7 +95,13 @@ class CausalMTFAnalyzer:
                     continue
                 if not (poi.created_time <= sweep.candle_time):
                     continue
-                pre_sweep_breaks = [\n                    b for b in breaks\n                    if b.source_swing_id in swing_by_id\n                    and swing_by_id[b.source_swing_id].index < sweep.candle_index\n                    and swing_by_id[b.source_swing_id].confirmation_index <= sweep.candle_index\n                ]\n                csd = confirm_csd(h4_view, sweep, pre_sweep_breaks, self.config.h4_csd_window)
+                pre_sweep_breaks = [
+                    b for b in breaks
+                    if b.source_swing_id in swing_by_id
+                    and swing_by_id[b.source_swing_id].index < sweep.candle_index
+                    and swing_by_id[b.source_swing_id].confirmation_index <= sweep.candle_index
+                ]
+                csd = confirm_csd(h4_view, sweep, pre_sweep_breaks, self.config.h4_csd_window)
                 if csd is None:
                     continue
 
