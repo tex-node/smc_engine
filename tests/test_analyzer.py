@@ -3,7 +3,8 @@ import pandas as pd
 
 from src.smc_engine.analyzer import MT5Analyzer
 from src.smc_engine.lifecycle import SetupRegistry
-from src.smc_engine.strategy import MultiTimeframeAnalyzer
+from src.smc_engine.causal import CausalMTFAnalyzer
+from src.smc_engine.strategy import MultiTimeframeConfig
 
 
 class FakeMarket:
@@ -26,7 +27,7 @@ def test_read_only_analyzer_fetches_closed_multi_timeframe_data():
     market = FakeMarket()
     analyzer = MT5Analyzer(
         market,
-        MultiTimeframeAnalyzer("TEST"),
+        CausalMTFAnalyzer("TEST", MultiTimeframeConfig()),
         SetupRegistry(),
         d1_count=20,
         h4_count=20,
