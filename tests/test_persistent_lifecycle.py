@@ -7,6 +7,9 @@ from src.smc_engine.reconcile import MT5LifecycleReconciler
 from src.smc_engine.store import SetupStore
 from src.smc_engine.models import Direction
 from src.smc_engine.setup import TradeSetup
+from src.smc_engine.execution import MT5ExecutionAdapter
+from src.smc_engine.market import SymbolSpec
+from src.smc_engine.risk import RiskEngine
 
 
 class FakeMT5:
@@ -22,6 +25,19 @@ class FakeMT5:
 
     def last_error(self):
         return (0, "ok")
+
+    ORDER_TYPE_BUY_LIMIT = 2
+    ORDER_TYPE_SELL_LIMIT = 3
+    TRADE_ACTION_PENDING = 5
+    ORDER_TIME_GTC = 0
+    TRADE_RETCODE_PLACED = 10008
+
+    def order_check(self, request):
+        return {"retcode": 0}
+
+    def order_send(self, request):
+        self.orders.append(SimpleNamespace(ticket=123, magic=request["magic"], comment=request["comment"]))
+        return {"retcode": self.TRADE_RETCODE_PLACED, "order": 123}
 
 
 def test_startup_reconcile_classifies_broker_only_state(tmp_path: Path):
@@ -146,4 +162,45 @@ def test_restart_reconciles_submitting_order_to_placed(tmp_path: Path):
     row = store.get(setup.id)
     assert row["state"] is SetupState.ORDER_PLACED
     assert row["ticket"] == 77
+    store.close()
+
+
+def test_submit_pending_persists_intent_before_broker_send(tmp_path: Path):
+    store = SetupStore(tmp_path / "state.sqlite3")
+    mt5 = FakeMT5()
+    registry = SetupRegistry()
+    lifecycle = __import__("src.smc_engine.lifecycle", fromlist=["SetupLifecycle"]).SetupLifecycle(make_setup())
+    registry.add(lifecycle)
+    coordinator = PersistentLifecycleCoordinator(store, MT5LifecycleReconciler(mt5, 202609, registry), registry)
+    spec = SymbolSpec("EURAUD", 5, 0.00001, 0.00001, 1.0, 0.01, 100, 0.01, 10, 0, 0)
+    execution = MT5ExecutionAdapter(mt5, RiskEngine(spec))
+
+    result = coordinator.submit_pending(lifecycle, execution, 1000, 1.099, 1.1003, "2026-01-01T00:03:00Z")
+    assert result.state is SetupState.ORDER_PLACED
+    assert result.ticket == 123
+    assert lifecycle.state is SetupState.ORDER_PLACED
+    assert store.get(lifecycle.setup.id)["ticket"] == 123
+    assert mt5.orders
+    store.close()
+
+
+def test_submit_pending_leaves_submitting_on_ambiguous_send(tmp_path: Path):
+    store = SetupStore(tmp_path / "state.sqlite3")
+    mt5 = FakeMT5()
+    registry = SetupRegistry()
+    lifecycle = __import__("src.smc_engine.lifecycle", fromlist=["SetupLifecycle"]).SetupLifecycle(make_setup())
+    registry.add(lifecycle)
+    coordinator = PersistentLifecycleCoordinator(store, MT5LifecycleReconciler(mt5, 202609, registry), registry)
+
+    class AmbiguousExecution:
+        mt5 = mt5
+        def build_limit_request(self, *args): return object()
+        def to_mt5_request(self, request): return {}
+        def preflight(self, payload): return {"retcode": 0}
+        def send(self, payload): raise RuntimeError("transport ambiguity")
+
+    result = coordinator.submit_pending(lifecycle, AmbiguousExecution(), 1000, 1.099, 1.1003, "2026-01-01T00:04:00Z")
+    assert result.ambiguous is True
+    assert result.state is SetupState.ORDER_SUBMITTING
+    assert store.get(lifecycle.setup.id)["state"] is SetupState.ORDER_SUBMITTING
     store.close()
