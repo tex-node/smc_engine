@@ -128,7 +128,8 @@ class CausalMTFAnalyzer:
                     # An order block must already exist when its IDM is confirmed.
                     idms = [
                         x for x in idms
-                        if pd.Timestamp(block.source_displacement_index >= 0 and m15_view.iloc[block.source_displacement_index]["time"]) <= pd.Timestamp(x.confirmation_time)
+                        if block.source_displacement_index >= 0
+                        and pd.Timestamp(m15_view.iloc[block.source_displacement_index]["time"]) <= pd.Timestamp(x.confirmation_time)
                     ]
                     contexts = execution_context(poi, [block], idms, poi.direction)
                     for context in contexts:
