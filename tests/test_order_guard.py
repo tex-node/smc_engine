@@ -42,6 +42,7 @@ class FakeMT5:
         return (0, "ok")
 
     TRADE_RETCODE_DONE = 10009
+    TRADE_ACTION_REMOVE = 8
 
     def order_send(self, request):
         return SimpleNamespace(retcode=self.TRADE_RETCODE_DONE, request=request)
