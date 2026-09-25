@@ -103,7 +103,7 @@ def test_reconcile_classifies_match_mismatch_and_missing(tmp_path: Path):
 
     mt5.orders[0].ticket = 12
     result = coordinator.startup_reconcile("EURAUD")
-    assert result[0].kind == ReconciliationKind.BROKER_ACTIVE_MATCH
+    assert result[0].kind == ReconciliationKind.BROKER_TICKET_MISMATCH
 
     store.upsert_setup(setup, SetupState.FILLED, "2026-01-01T00:02:00Z", ticket=12)
     result = coordinator.startup_reconcile("EURAUD")
