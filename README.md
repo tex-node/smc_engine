@@ -296,3 +296,14 @@ SQLite now persists:
 - invalidation/rejection reason.
 
 This provides the durable strategy-side record required for deterministic restart reconciliation. MT5 remains the authoritative source for broker execution state; SQLite remains the authoritative source for SMC provenance and lifecycle history.
+
+
+### Phase 20 — Persistent lifecycle coordinator
+
+Added `src/smc_engine/persistent_lifecycle.py`.
+
+The polling boundary now supports startup reconciliation and refuses to accept a new setup while either:
+- an active strategy record exists in SQLite; or
+- an active broker identity exists in MT5.
+
+Lifecycle transitions can be persisted together with transition history. This establishes the restart-safe coordination boundary before execution is enabled.
