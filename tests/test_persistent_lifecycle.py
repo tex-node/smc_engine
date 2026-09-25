@@ -248,3 +248,30 @@ def test_success_without_broker_ticket_stays_submitting(tmp_path: Path):
     assert lifecycle.state is SetupState.ORDER_SUBMITTING
     assert store.get(lifecycle.setup.id)["state"] is SetupState.ORDER_SUBMITTING
     store.close()
+
+def test_resumed_preflighted_order_is_repreflighted_before_send(tmp_path: Path):
+    store = SetupStore(tmp_path / "state.sqlite3")
+    mt5 = FakeMT5()
+    registry = SetupRegistry()
+    lifecycle = __import__("src.smc_engine.lifecycle", fromlist=["SetupLifecycle"]).SetupLifecycle(
+        make_setup(), SetupState.ORDER_PREFLIGHTED, "broker preflight passed"
+    )
+    registry.add(lifecycle)
+    coordinator = PersistentLifecycleCoordinator(store, MT5LifecycleReconciler(mt5, 202609, registry), registry)
+    spec = SymbolSpec("EURAUD", 5, 0.00001, 0.00001, 1.0, 0.01, 100, 0.01, 10, 0, 0)
+    lifecycle.setup = replace(lifecycle.setup, stop_loss=1.099)
+
+    class CountingExecution(MT5ExecutionAdapter):
+        def __init__(self, mt5_module, risk):
+            super().__init__(mt5_module, risk)
+            self.preflight_calls = 0
+        def preflight(self, payload):
+            self.preflight_calls += 1
+            return super().preflight(payload)
+
+    execution = CountingExecution(mt5, RiskEngine(spec))
+    result = coordinator.submit_pending(lifecycle, execution, 1000, 1.099, 1.1003, "2026-01-01T00:06:00Z")
+    assert result.state is SetupState.ORDER_PLACED
+    assert execution.preflight_calls == 1
+    assert mt5.orders
+    store.close()
