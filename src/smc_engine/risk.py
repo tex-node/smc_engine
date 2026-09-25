@@ -58,13 +58,16 @@ class RiskEngine:
             raise ValueError("balance and risk_percent must be positive")
         if entry == stop_loss:
             raise ValueError("entry and stop_loss cannot be equal")
-        risk_money = balance * risk_percent / 100.0
-        loss_per_lot = self._loss_per_lot(entry, stop_loss)
+        risk_money = Decimal(str(balance)) * Decimal(str(risk_percent)) / Decimal("100")
+        loss_per_lot = Decimal(str(self._loss_per_lot(entry, stop_loss)))
         if loss_per_lot <= 0:
             raise ValueError("calculated loss per lot must be positive")
+
         step = Decimal(str(self.spec.volume_step))
-        raw = Decimal(str(risk_money / loss_per_lot))
-        volume = float((raw / step).to_integral_value(rounding=ROUND_DOWN) * step)
+        raw = risk_money / loss_per_lot
+        volume_decimal = (raw / step).to_integral_value(rounding=ROUND_DOWN) * step
+        volume = float(volume_decimal)
+
         if volume < self.spec.volume_min:
             raise ValueError(
                 f"Calculated volume {volume} is below broker minimum {self.spec.volume_min}; "
@@ -72,10 +75,11 @@ class RiskEngine:
             )
         if volume > self.spec.volume_max:
             volume = self.spec.volume_max
+
         estimated_loss = self._loss_for_volume(volume, entry, stop_loss)
-        if estimated_loss > risk_money * 1.000001:
+        if estimated_loss > float(risk_money) * 1.000001:
             raise ValueError("broker-calculated loss exceeds requested risk")
-        return RiskQuote(volume, estimated_loss, risk_money, risk_percent)
+        return RiskQuote(volume, estimated_loss, float(risk_money), risk_percent)
 
     def _loss_per_lot(self, entry: float, stop_loss: float) -> float:
         if self.mt5 is not None:
