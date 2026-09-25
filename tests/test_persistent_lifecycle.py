@@ -2,7 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from src.smc_engine.lifecycle import SetupRegistry, SetupState
-from src.smc_engine.persistent_lifecycle import PersistentLifecycleCoordinator
+from src.smc_engine.persistent_lifecycle import PersistentLifecycleCoordinator, ReconciliationKind
 from src.smc_engine.reconcile import MT5LifecycleReconciler
 from src.smc_engine.store import SetupStore
 
@@ -22,7 +22,7 @@ class FakeMT5:
         return (0, "ok")
 
 
-def test_startup_reconcile_returns_broker_identities(tmp_path: Path):
+def test_startup_reconcile_classifies_broker_only_state(tmp_path: Path):
     mt5 = FakeMT5()
     mt5.orders = [
         SimpleNamespace(ticket=11, magic=202609, comment="SMC SETUP-EURAUD-1-OB")
@@ -34,7 +34,11 @@ def test_startup_reconcile_returns_broker_identities(tmp_path: Path):
         SetupRegistry(),
     )
 
-    assert coordinator.startup_reconcile("EURAUD") == {"SETUP-EURAUD-1-OB"}
+    results = coordinator.startup_reconcile("EURAUD")
+    assert len(results) == 1
+    assert results[0].kind == ReconciliationKind.BROKER_ACTIVE_UNKNOWN
+    assert results[0].setup_id == "SETUP-EURAUD-1-OB"
+    assert results[0].ticket == 11
     store.close()
 
 
