@@ -75,8 +75,8 @@ def build_d1_pois(
     The candle itself is used as the initial zone definition. Mitigation and
     invalidation are handled separately so the POI lifecycle is explicit.
     """
-    if lookback_bars < config.atr_period + 1:
-        raise ValueError("lookback_bars must leave enough history for ATR")
+    if len(df) < config.atr_period + 1:
+        return []
 
     work = detect_displacement(df, config).tail(lookback_bars).reset_index(drop=True)
     pois: list[POI] = []
