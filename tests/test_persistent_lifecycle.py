@@ -275,3 +275,21 @@ def test_resumed_preflighted_order_is_repreflighted_before_send(tmp_path: Path):
     assert execution.preflight_calls == 1
     assert mt5.orders
     store.close()
+
+def test_ambiguous_submitting_state_blocks_new_setup_after_restart(tmp_path: Path):
+    store = SetupStore(tmp_path / "state.sqlite3")
+    setup = make_setup()
+    store.upsert_setup(setup, SetupState.ORDER_SUBMITTING, "2026-01-01T00:07:00Z")
+    mt5 = FakeMT5()
+    registry = SetupRegistry()
+    coordinator = PersistentLifecycleCoordinator(
+        store, MT5LifecycleReconciler(mt5, 202609, registry), registry
+    )
+
+    results = coordinator.startup_reconcile("EURAUD")
+    assert len(results) == 1
+    assert results[0].kind == ReconciliationKind.PERSISTED_MISSING_BROKER
+    assert results[0].persisted_state is SetupState.ORDER_SUBMITTING
+    assert not coordinator.can_accept_new_setup("EURAUD")
+    assert registry.get(setup.id).state is SetupState.ORDER_SUBMITTING
+    store.close()
