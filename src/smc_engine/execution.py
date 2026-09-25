@@ -64,7 +64,8 @@ class MT5ExecutionAdapter:
 
     @staticmethod
     def _broker_comment(setup_id: str) -> str:
-        comment = f"SMC {setup_id if setup_id.startswith("SETUP-") else "SETUP-" + setup_id}"
+        identity = setup_id if setup_id.startswith("SETUP-") else f"SETUP-{setup_id}"
+        comment = f"SMC {identity}"
         if len(comment) > 31:
             raise ValueError("setup id is too long for the MT5 order comment identity")
         return comment
