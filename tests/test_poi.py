@@ -11,7 +11,7 @@ def test_displacement_requires_body_and_close_location():
     x = df([
         [1, 100, 101, 99, 100.5],
         [2, 100.5, 101, 100, 100.8],
-        [3, 100.8, 104, 100, 103.8],
+        [3, 100.8, 108, 100, 107.8],
         [4, 103.8, 104, 103, 103.5],
     ])
     out = detect_displacement(x, DisplacementConfig(atr_period=2, body_atr_multiple=1.5))
