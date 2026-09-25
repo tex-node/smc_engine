@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass\nimport pandas as pd
 from typing import Optional
 
 from .execution_structure import ExecutionContext
@@ -28,7 +28,7 @@ def find_irl_target(
     Bullish trades target the nearest unmitigated swing high above entry.
     Bearish trades target the nearest unmitigated swing low below entry.
     """
-    blocked = mitigated_swing_ids or set()
+    blocked = mitigated_swing_ids or set()\n    if as_of is not None:\n        swings = [s for s in swings if pd.Timestamp(s.confirmation_time) <= pd.Timestamp(as_of)]
     if direction is Direction.BULLISH:
         candidates = [
             s for s in swings
