@@ -5,8 +5,7 @@ from typing import Optional
 
 import pandas as pd
 
-from .models import Direction, POI
-
+from .models import Direction, Inducement, POI
 
 @dataclass(frozen=True)
 class OrderBlock:
@@ -24,25 +23,12 @@ class OrderBlock:
     def contains(self, price: float) -> bool:
         return self.low <= price <= self.high
 
-
-@dataclass(frozen=True)
-class Inducement:
-    id: str
-    direction: Direction
-    candle_index: int
-    candle_time: object
-    level: float
-    source_swing_index: int
-    order_block_id: str
-
-
 @dataclass(frozen=True)
 class ExecutionContext:
     poi: POI
     order_block: OrderBlock
     inducement: Inducement
     direction: Direction
-
 
 def _opposite_candle(df: pd.DataFrame, displacement_index: int, direction: Direction, search_back: int) -> Optional[int]:
     start = max(0, displacement_index - search_back)
@@ -53,7 +39,6 @@ def _opposite_candle(df: pd.DataFrame, displacement_index: int, direction: Direc
         if direction is Direction.BEARISH and row['close'] > row['open']:
             return i
     return None
-
 
 def find_order_blocks(df: pd.DataFrame, displacement_indices: list[int], timeframe: str = 'M15', search_back: int = 5) -> list[OrderBlock]:
     blocks: list[OrderBlock] = []
@@ -66,14 +51,12 @@ def find_order_blocks(df: pd.DataFrame, displacement_indices: list[int], timefra
             continue
         row = df.iloc[source]
         blocks.append(OrderBlock(
-            id=f'OB-{timeframe}-{source}-{direction.value}',
-            direction=direction, timeframe=timeframe, candle_index=source, candle_time=row['time'],
-            low=float(row['low']), high=float(row['high']),
+            id=f'OB-{timeframe}-{source}-{direction.value}', direction=direction, timeframe=timeframe,
+            candle_index=source, candle_time=row['time'], low=float(row['low']), high=float(row['high']),
             mitigation_price=float(row['high'] if direction is Direction.BULLISH else row['low']),
             source_displacement_index=d,
         ))
     return blocks
-
 
 def find_inducements(df: pd.DataFrame, order_blocks: list[OrderBlock], swings, max_bars_after_ob: int = 8, as_of=None) -> list[Inducement]:
     cutoff = None if as_of is None else pd.Timestamp(as_of)
@@ -101,10 +84,10 @@ def find_inducements(df: pd.DataFrame, order_blocks: list[OrderBlock], swings, m
         swing = eligible[-1]
         result.append(Inducement(
             id=f'IDM-{ob.id}-{swing.index}', direction=ob.direction, candle_index=swing.index,
-            candle_time=swing.time, level=swing.price, source_swing_index=swing.index, order_block_id=ob.id,
+            candle_time=swing.time, level=swing.price, source_swing_index=swing.index,
+            order_block_id=ob.id, confirmation_time=getattr(swing, 'confirmation_time', swing.time),
         ))
     return result
-
 
 def execution_context(poi: POI, order_blocks: list[OrderBlock], inducements: list[Inducement], direction: Direction) -> list[ExecutionContext]:
     if poi.direction is not direction:
