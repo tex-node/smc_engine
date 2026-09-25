@@ -193,13 +193,13 @@ def test_submit_pending_leaves_submitting_on_ambiguous_send(tmp_path: Path):
     coordinator = PersistentLifecycleCoordinator(store, MT5LifecycleReconciler(mt5, 202609, registry), registry)
 
     class AmbiguousExecution:
-        mt5 = mt5
+        def __init__(self, mt5_module): self.mt5 = mt5_module
         def build_limit_request(self, *args): return object()
         def to_mt5_request(self, request): return {}
         def preflight(self, payload): return {"retcode": 0}
         def send(self, payload): raise RuntimeError("transport ambiguity")
 
-    result = coordinator.submit_pending(lifecycle, AmbiguousExecution(), 1000, 1.099, 1.1003, "2026-01-01T00:04:00Z")
+    result = coordinator.submit_pending(lifecycle, AmbiguousExecution(mt5), 1000, 1.099, 1.1003, "2026-01-01T00:04:00Z")
     assert result.ambiguous is True
     assert result.state is SetupState.ORDER_SUBMITTING
     assert store.get(lifecycle.setup.id)["state"] is SetupState.ORDER_SUBMITTING
