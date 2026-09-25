@@ -348,3 +348,29 @@ def test_missing_broker_order_can_be_resolved_from_history_without_state_change(
     assert result.persisted_state is SetupState.ORDER_PLACED
     assert store.get(setup.id)["state"] is SetupState.ORDER_PLACED
     store.close()
+
+
+def test_missing_broker_history_rejects_wrong_magic_or_symbol(tmp_path: Path):
+    store = SetupStore(tmp_path / "state.sqlite3")
+    setup = make_setup()
+    store.upsert_setup(setup, SetupState.ORDER_PLACED, "2026-01-01T00:09:00Z", ticket=11)
+    mt5 = FakeMT5()
+    mt5.history_orders = {
+        11: SimpleNamespace(
+            ticket=11,
+            magic=999999,
+            symbol="OTHER",
+            comment="SMC SETUP-EURAUD-1-OB",
+            state=4,
+        )
+    }
+    registry = SetupRegistry()
+    coordinator = PersistentLifecycleCoordinator(
+        store, MT5LifecycleReconciler(mt5, 202609, registry), registry
+    )
+
+    result = coordinator.resolve_missing_broker_order(setup.id, "EURAUD")
+    assert result.kind == ReconciliationKind.BROKER_TICKET_MISMATCH
+    assert result.ticket == 11
+    assert store.get(setup.id)["state"] is SetupState.ORDER_PLACED
+    store.close()
