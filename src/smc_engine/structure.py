@@ -100,11 +100,7 @@ def confirm_csd(
             if not (source.index < sweep.candle_index and source.confirmation_index <= sweep.candle_index):
                 continue
         else:
-            try:
-                source_index = int(b.source_swing_id.rsplit("-", 1)[1])
-            except (ValueError, IndexError):
-                continue
-            if source_index >= sweep.candle_index:
+            if swings is not None:
                 continue
     if not candidates:
         return None
