@@ -121,3 +121,18 @@ The D1 layer now has explicit primitives for:
 - explicit price-in-POI checks
 
 The strategy still does not place orders from these new primitives. The old live bot remains isolated until the complete setup state machine exists.
+
+
+### Phase 4 — M15 execution structure
+
+Added `src/smc_engine/execution_structure.py` and `tests/test_execution_structure.py`.
+
+The execution layer now has explicit primitives for:
+
+- M15 Order Blocks derived from the last opposite-direction candle before displacement
+- OB high/low zone boundaries
+- directional OB mitigation price
+- M15 inducement candidates derived from confirmed directional swings after the OB
+- joining D1 POI + M15 OB + IDM into an execution context
+
+These are detection primitives only. They do not place orders and are not yet connected to the live bot.
