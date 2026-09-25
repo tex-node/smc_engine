@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import floor
+from math import floor\nfrom decimal import Decimal, ROUND_DOWN
 from typing import Any
 
 from .market import SymbolSpec
