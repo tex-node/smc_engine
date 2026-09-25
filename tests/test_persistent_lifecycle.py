@@ -109,3 +109,21 @@ def test_startup_restores_persisted_lifecycle_into_registry(tmp_path: Path):
     assert restored.state is SetupState.ORDER_PLACED
     assert restored.setup == setup
     store.close()
+
+
+def test_unknown_magic_owned_broker_object_blocks_new_setup(tmp_path: Path):
+    store = SetupStore(tmp_path / "state.sqlite3")
+    mt5 = FakeMT5()
+    mt5.orders = [
+        SimpleNamespace(ticket=99, magic=202609, comment="SMC PENDING")
+    ]
+    registry = SetupRegistry()
+    coordinator = PersistentLifecycleCoordinator(
+        store, MT5LifecycleReconciler(mt5, 202609, registry), registry
+    )
+
+    results = coordinator.startup_reconcile("EURAUD")
+    assert results[0].kind == ReconciliationKind.BROKER_ACTIVE_UNKNOWN
+    assert results[0].setup_id == "BROKER-UNKNOWN-ORDER-99"
+    assert not coordinator.can_accept_new_setup("EURAUD")
+    store.close()
