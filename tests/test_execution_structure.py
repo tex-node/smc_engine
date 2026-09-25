@@ -95,3 +95,16 @@ def test_inducement_window_is_anchored_to_order_block():
     late_swing = SwingPoint("SL-LATE", 7, 8, SwingType.LOW, 99, 5, 7, 8)
 
     assert find_inducements(x, blocks, [late_swing], max_bars_after_ob=3) == []
+
+
+def test_order_block_requires_displacement_annotation_when_available():
+    x = candles([
+        [1, 100, 102, 99, 101],
+        [2, 101, 102, 98, 99],
+        [3, 99, 103, 98, 102],
+        [4, 102, 105, 101, 104],
+    ])
+    x["displacement_bullish"] = [False, False, False, False]
+    x["displacement_bearish"] = [False, False, False, False]
+
+    assert find_order_blocks(x, [3]) == []
