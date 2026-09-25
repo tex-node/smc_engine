@@ -40,3 +40,18 @@ def test_active_unmitigated_poi_is_at_current_price():
     pois = active_unmitigated_pois(x, lookback_bars=4, config=DisplacementConfig(atr_period=2, body_atr_multiple=1.0))
     assert pois
     assert any(price_is_at_poi(103.5, p) for p in pois)
+
+
+def test_d1_poi_identity_is_stable_when_lookback_window_moves():
+    times = pd.date_range("2026-01-01", periods=20, freq="D", tz="UTC")
+    rows = []
+    for i, t in enumerate(times):
+        rows.append([t, 100.0, 101.0, 99.0, 100.0])
+    rows[14] = [times[14], 100.0, 108.0, 99.0, 107.8]
+    x = df(rows)
+
+    config = DisplacementConfig(atr_period=2, body_atr_multiple=1.0)
+    wide = next(p for p in build_d1_pois(x, lookback_bars=20, config=config) if p.created_time == times[14])
+    narrow = next(p for p in build_d1_pois(x, lookback_bars=6, config=config) if p.created_time == times[14])
+
+    assert wide.id == narrow.id
