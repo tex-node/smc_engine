@@ -375,3 +375,27 @@ def test_missing_broker_history_rejects_wrong_magic_or_symbol(tmp_path: Path):
     assert result.ticket == 11
     assert store.get(setup.id)["state"] is SetupState.ORDER_PLACED
     store.close()
+
+
+def test_reconcile_classifies_position_recovery_without_overwriting_order_ticket(tmp_path: Path):
+    store = SetupStore(tmp_path / "state.sqlite3")
+    setup = make_setup()
+    store.upsert_setup(setup, SetupState.ORDER_PLACED, "2026-01-01T00:10:00Z", ticket=11)
+    mt5 = FakeMT5()
+    mt5.orders = []
+    mt5.positions_ = [
+        SimpleNamespace(ticket=77, magic=202609, comment="SMC SETUP-EURAUD-1-OB")
+    ]
+    registry = SetupRegistry()
+    coordinator = PersistentLifecycleCoordinator(
+        store, MT5LifecycleReconciler(mt5, 202609, registry), registry
+    )
+
+    results = coordinator.startup_reconcile("EURAUD")
+    assert len(results) == 1
+    assert results[0].kind == ReconciliationKind.BROKER_POSITION_RECOVERY_AVAILABLE
+    assert results[0].persisted_state is SetupState.ORDER_PLACED
+    assert results[0].ticket == 77
+    assert store.get(setup.id)["ticket"] == 11
+    assert registry.get(setup.id).state is SetupState.ORDER_PLACED
+    store.close()
