@@ -140,6 +140,8 @@ class PersistentLifecycleCoordinator:
             broker_result = execution.send(payload)
         except Exception as exc:
             return SubmissionResult(SetupState.ORDER_SUBMITTING, broker_result=exc, ambiguous=True)
+        if broker_result is None:
+            return SubmissionResult(SetupState.ORDER_SUBMITTING, broker_result=execution.mt5.last_error(), ambiguous=True)
         retcode = getattr(broker_result, "retcode", None)
         if retcode is None and isinstance(broker_result, dict):
             retcode = broker_result.get("retcode")
