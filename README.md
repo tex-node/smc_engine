@@ -225,3 +225,14 @@ D1 POI → H4 sweep → H4 CSD → M15 displacement → M15 OB → M15 IDM → M
 It is deliberately independent of MT5. The same orchestrator can therefore feed the historical replay broker or the MT5 execution adapter.
 
 The orchestrator currently returns candidate setups rather than placing orders.
+
+
+### Phase 10 — Read-only MT5 analyzer bridge
+
+Added `src/smc_engine/analyzer.py` and `tests/test_analyzer.py`.
+
+This is the first end-to-end MT5-facing layer:
+
+MT5 closed D1/H4/M15 candles → pure multi-timeframe strategy → candidate TradeSetup → lifecycle registry.
+
+It remains strictly read-only. No `order_send()` is reachable from this analyzer.
