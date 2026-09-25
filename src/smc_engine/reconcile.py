@@ -37,6 +37,12 @@ class MT5LifecycleReconciler:
             raise RuntimeError(f"Unable to read positions: {self.mt5.last_error()}")
 
         for order in orders:
+            record_symbol = getattr(order, "symbol", None)
+            if record_symbol is not None and str(record_symbol) != symbol:
+                raise RuntimeError(
+                    f"Broker returned order {getattr(order, 'ticket', '?')} for {record_symbol!r} "
+                    f"while reconciling {symbol!r}"
+                )
             if getattr(order, "magic", None) != self.magic:
                 continue
             setup_id = self.setup_id_from_comment(getattr(order, "comment", "")) or self._unknown_setup_id("ORDER", int(order.ticket))
@@ -52,6 +58,12 @@ class MT5LifecycleReconciler:
                 )
 
         for position in positions:
+            record_symbol = getattr(position, "symbol", None)
+            if record_symbol is not None and str(record_symbol) != symbol:
+                raise RuntimeError(
+                    f"Broker returned position {getattr(position, 'ticket', '?')} for {record_symbol!r} "
+                    f"while reconciling {symbol!r}"
+                )
             if getattr(position, "magic", None) != self.magic:
                 continue
             setup_id = self.setup_id_from_comment(getattr(position, "comment", "")) or self._unknown_setup_id("POSITION", int(position.ticket))
