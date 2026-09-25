@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from .lifecycle import SetupLifecycle, SetupRegistry, SetupState
 from .reconcile import MT5LifecycleReconciler
@@ -33,6 +33,13 @@ class PersistentLifecycle:
             reason=self.lifecycle.reason,
         )
 
+
+@dataclass(frozen=True)
+class SubmissionResult:
+    state: SetupState
+    broker_result: Any = None
+    ticket: Optional[int] = None
+    ambiguous: bool = False
 
 class ReconciliationKind:
     BROKER_ACTIVE_MATCH = "BROKER_ACTIVE_MATCH"
@@ -114,6 +121,44 @@ class PersistentLifecycleCoordinator:
                     setup_id, None, row["state"], row["ticket"],
                 ))
         return results
+
+    def submit_pending(self, lifecycle: SetupLifecycle, execution: Any, balance: float, bid: float, ask: float, event_time: object) -> SubmissionResult:
+        if lifecycle.state is SetupState.EXECUTION_READY:
+            PersistentLifecycle(lifecycle, self.store).transition(SetupState.ORDER_PREPARED, event_time, "pending order prepared")
+        if lifecycle.state is SetupState.ORDER_PREPARED:
+            request = execution.build_limit_request(lifecycle.setup, balance, bid, ask)
+            payload = execution.to_mt5_request(request)
+            execution.preflight(payload)
+            PersistentLifecycle(lifecycle, self.store).transition(SetupState.ORDER_PREFLIGHTED, event_time, "broker preflight passed")
+        elif lifecycle.state is SetupState.ORDER_PREFLIGHTED:
+            request = execution.build_limit_request(lifecycle.setup, balance, bid, ask)
+            payload = execution.to_mt5_request(request)
+        else:
+            raise ValueError(f"Cannot submit lifecycle in state {lifecycle.state.value}")
+        PersistentLifecycle(lifecycle, self.store).transition(SetupState.ORDER_SUBMITTING, event_time, "durable submission intent recorded")
+        try:
+            broker_result = execution.send(payload)
+        except Exception as exc:
+            return SubmissionResult(SetupState.ORDER_SUBMITTING, broker_result=exc, ambiguous=True)
+        retcode = getattr(broker_result, "retcode", None)
+        if retcode is None and isinstance(broker_result, dict):
+            retcode = broker_result.get("retcode")
+        success_codes = {0}
+        for name in ("TRADE_RETCODE_DONE", "TRADE_RETCODE_PLACED"):
+            value = getattr(execution.mt5, name, None)
+            if value is not None:
+                success_codes.add(value)
+        if retcode not in success_codes:
+            PersistentLifecycle(lifecycle, self.store).transition(SetupState.BROKER_REJECTED, event_time, f"broker rejected pending order retcode={retcode}")
+            return SubmissionResult(SetupState.BROKER_REJECTED, broker_result=broker_result)
+        ticket = None
+        if isinstance(broker_result, dict):
+            ticket = broker_result.get("order") or broker_result.get("ticket")
+        else:
+            ticket = getattr(broker_result, "order", None) or getattr(broker_result, "ticket", None)
+        PersistentLifecycle(lifecycle, self.store).transition(SetupState.ORDER_PLACED, event_time, "broker accepted pending order")
+        self.store.upsert_setup(lifecycle.setup, lifecycle.state, event_time, ticket=ticket, reason=lifecycle.reason)
+        return SubmissionResult(SetupState.ORDER_PLACED, broker_result=broker_result, ticket=ticket)
 
     def can_accept_new_setup(self, symbol: str) -> bool:
         broker_ids = self.reconciler.active_setup_ids(symbol)
