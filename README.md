@@ -281,3 +281,18 @@ Before an execution-capable path can submit a setup, the broker boundary can now
 - cancel an existing pending order through the MT5 removal action.
 
 The dry-run coordinator now uses these guards when supplied.
+
+
+### Phase 19 — Persistent setup state
+
+Added `src/smc_engine/store.py`.
+
+SQLite now persists:
+- complete TradeSetup metadata;
+- current lifecycle state;
+- broker ticket;
+- creation/update timestamps;
+- lifecycle transition history;
+- invalidation/rejection reason.
+
+This provides the durable strategy-side record required for deterministic restart reconciliation. MT5 remains the authoritative source for broker execution state; SQLite remains the authoritative source for SMC provenance and lifecycle history.
