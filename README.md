@@ -105,3 +105,19 @@ This is deliberately additive. The existing varis_smc_bot.py remains untouched u
 4. Add structural IRL targeting.
 5. Replace the current risk/execution layer with broker-aware validation using MT5 symbol properties, order_check() and order_calc_profit().
 6. Introduce the setup state machine and only then connect the new engine to live/demo execution.
+
+
+### Phase 3 — D1 POI lifecycle
+
+Added `src/smc_engine/poi.py` and `tests/test_poi.py`.
+
+The D1 layer now has explicit primitives for:
+
+- ATR-based displacement (body >= 1.5 ATR by default)
+- directional displacement / close-location filtering
+- D1 demand and supply POIs
+- POI lifecycle state: ACTIVE, TOUCHED, MITIGATED, INVALIDATED
+- filtering for currently active/unmitigated POIs
+- explicit price-in-POI checks
+
+The strategy still does not place orders from these new primitives. The old live bot remains isolated until the complete setup state machine exists.
