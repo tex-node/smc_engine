@@ -222,14 +222,22 @@ class PersistentLifecycleCoordinator:
                 row["state"],
                 ticket,
             )
-        historical_setup_id = self.reconciler._setup_id(getattr(history, "comment", ""))
-        if historical_setup_id != setup_id:
+        historical_setup_id = self.reconciler.setup_id_from_comment(getattr(history, "comment", ""))
+        historical_ticket = int(getattr(history, "ticket", ticket))
+        historical_magic = getattr(history, "magic", None)
+        historical_symbol = getattr(history, "symbol", None)
+        if (
+            historical_setup_id != setup_id
+            or historical_ticket != int(ticket)
+            or (historical_magic is not None and int(historical_magic) != int(self.reconciler.magic))
+            or (historical_symbol is not None and str(historical_symbol) != symbol)
+        ):
             return ReconciliationResult(
                 ReconciliationKind.BROKER_TICKET_MISMATCH,
                 setup_id,
                 None,
                 row["state"],
-                int(getattr(history, "ticket", ticket)),
+                historical_ticket,
             )
         return ReconciliationResult(
             ReconciliationKind.HISTORICAL_ORDER_FOUND,
