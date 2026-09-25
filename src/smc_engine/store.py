@@ -52,7 +52,7 @@ class SetupStore:
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_setups_symbol_state ON setups(symbol, state)")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_events_setup_time ON lifecycle_events(setup_id, event_time)")
         self._conn.execute(
-            "INSERT INTO schema_meta(key,value) VALUES('schema_version,?') "
+            "INSERT INTO schema_meta(key,value) VALUES('schema_version',?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (str(self.SCHEMA_VERSION),),
         )
