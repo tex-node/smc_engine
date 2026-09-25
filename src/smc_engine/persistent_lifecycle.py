@@ -154,7 +154,7 @@ class PersistentLifecycleCoordinator:
                         record.setup_id,
                         record.state,
                         row["state"],
-                        row["ticket"],
+                        record.ticket,
                         position_ticket=record.ticket,
                     ))
                 else:
