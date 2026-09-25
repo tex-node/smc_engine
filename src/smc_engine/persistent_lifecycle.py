@@ -48,6 +48,7 @@ class ReconciliationKind:
     STATE_MISMATCH = "STATE_MISMATCH"
     SUBMISSION_CONFIRMED = "SUBMISSION_CONFIRMED"
     BROKER_IDENTITY_CONFLICT = "BROKER_IDENTITY_CONFLICT"
+    BROKER_TICKET_MISMATCH = "BROKER_TICKET_MISMATCH"
 
 
 @dataclass(frozen=True)
@@ -124,6 +125,11 @@ class PersistentLifecycleCoordinator:
                         ticket=record.ticket,
                     )
                 results.append(ReconciliationResult(ReconciliationKind.SUBMISSION_CONFIRMED, record.setup_id, record.state, row["state"], record.ticket))
+            elif row["state"] is record.state and row["ticket"] is not None and int(row["ticket"]) != int(record.ticket):
+                results.append(ReconciliationResult(
+                    ReconciliationKind.BROKER_TICKET_MISMATCH,
+                    record.setup_id, record.state, row["state"], record.ticket,
+                ))
             elif row["state"] is record.state:
                 results.append(ReconciliationResult(
                     ReconciliationKind.BROKER_ACTIVE_MATCH,
