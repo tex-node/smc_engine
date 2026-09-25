@@ -50,6 +50,7 @@ class ReconciliationKind:
     BROKER_IDENTITY_CONFLICT = "BROKER_IDENTITY_CONFLICT"
     BROKER_TICKET_MISMATCH = "BROKER_TICKET_MISMATCH"
     HISTORICAL_ORDER_FOUND = "HISTORICAL_ORDER_FOUND"
+    BROKER_POSITION_RECOVERY_AVAILABLE = "BROKER_POSITION_RECOVERY_AVAILABLE"
 
 
 @dataclass(frozen=True)
@@ -130,6 +131,17 @@ class PersistentLifecycleCoordinator:
             elif row["state"] is record.state and row["ticket"] is not None and int(row["ticket"]) != int(record.ticket):
                 results.append(ReconciliationResult(
                     ReconciliationKind.BROKER_TICKET_MISMATCH,
+                    record.setup_id, record.state, row["state"], record.ticket,
+                ))
+            elif (
+                record.state is SetupState.POSITION_MANAGED
+                and row["state"] in {SetupState.ORDER_PLACED, SetupState.FILLED, SetupState.POSITION_MANAGED}
+            ):
+                # MT5 position tickets are not guaranteed to equal the originating
+                # pending-order ticket. Identity/comment is the durable correlation
+                # key here; do not overwrite the persisted order ticket implicitly.
+                results.append(ReconciliationResult(
+                    ReconciliationKind.BROKER_POSITION_RECOVERY_AVAILABLE,
                     record.setup_id, record.state, row["state"], record.ticket,
                 ))
             elif row["state"] is record.state:
