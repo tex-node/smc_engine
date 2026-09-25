@@ -212,3 +212,16 @@ Replay behavior includes:
 - aggregate setup/fill/target/stop/invalidation metrics
 
 This is an engineering validation harness, not a claim of trading performance. Tick-level replay can be added later where broker/tick history is available.
+
+
+### Phase 9 — Multi-timeframe strategy orchestrator
+
+Added `src/smc_engine/strategy.py` and `tests/test_strategy.py`.
+
+The new pure strategy layer accepts synchronized completed D1/H4/M15 DataFrames and composes:
+
+D1 POI → H4 sweep → H4 CSD → M15 displacement → M15 OB → M15 IDM → M15 IRL → TradeSetup.
+
+It is deliberately independent of MT5. The same orchestrator can therefore feed the historical replay broker or the MT5 execution adapter.
+
+The orchestrator currently returns candidate setups rather than placing orders.
