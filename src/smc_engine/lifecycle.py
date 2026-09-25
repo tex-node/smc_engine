@@ -17,6 +17,7 @@ class SetupState(str, Enum):
     EXECUTION_READY = "EXECUTION_READY"
     ORDER_PREPARED = "ORDER_PREPARED"
     ORDER_PREFLIGHTED = "ORDER_PREFLIGHTED"
+    ORDER_SUBMITTING = "ORDER_SUBMITTING"
     ORDER_PLACED = "ORDER_PLACED"
     FILLED = "FILLED"
     POSITION_MANAGED = "POSITION_MANAGED"
@@ -52,6 +53,10 @@ class SetupLifecycle:
                 SetupState.ENTRY_NO_LONGER_VALID,
             },
             SetupState.ORDER_PREFLIGHTED: {
+                SetupState.ORDER_SUBMITTING,
+                SetupState.BROKER_REJECTED,
+            },
+            SetupState.ORDER_SUBMITTING: {
                 SetupState.ORDER_PLACED,
                 SetupState.BROKER_REJECTED,
             },
