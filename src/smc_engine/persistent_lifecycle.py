@@ -63,7 +63,20 @@ class PersistentLifecycleCoordinator:
         self.reconciler = reconciler
         self.registry = registry
 
+    def restore_persisted_active(self, symbol: str) -> list[SetupLifecycle]:
+        restored: list[SetupLifecycle] = []
+        for row in self.store.active(symbol):
+            setup = self.store.load_setup(row["setup_id"])
+            if setup is None:
+                continue
+            lifecycle = SetupLifecycle(setup, row["state"], row["reason"])
+            if self.registry.get(setup.id) is None:
+                self.registry.add(lifecycle)
+            restored.append(lifecycle)
+        return restored
+
     def startup_reconcile(self, symbol: str) -> list[ReconciliationResult]:
+        self.restore_persisted_active(symbol)
         broker_records = self.reconciler.reconcile(symbol)
         broker_ids = {record.setup_id for record in broker_records}
         persisted = {row["setup_id"]: row for row in self.store.active(symbol)}
