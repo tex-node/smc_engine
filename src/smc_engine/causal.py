@@ -26,6 +26,8 @@ def _latest_index_at_or_before(df: pd.DataFrame, timestamp) -> int:
 class CausalCandidate:
     setup: object
     setup_time: object
+    sweep: object
+    csd: object
 
 
 class CausalMTFAnalyzer:
@@ -147,6 +149,6 @@ class CausalMTFAnalyzer:
                             )
                         except ValueError:
                             continue
-                        candidates.append(CausalCandidate(setup, event_time))
+                        candidates.append(CausalCandidate(setup, event_time, sweep, csd))
 
         return candidates
