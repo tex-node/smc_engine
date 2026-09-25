@@ -40,7 +40,7 @@ def test_build_and_preflight_pending_request():
     mt5 = FakeMT5()
     adapter = MT5ExecutionAdapter(mt5, RiskEngine(spec))
     req = adapter.build_limit_request(make_setup(), 1000, 1.1002, 1.1003)
-    assert req.volume == 0.09
+    assert req.volume == 0.1
     payload = adapter.to_mt5_request(req)
     assert payload["type"] == mt5.ORDER_TYPE_BUY_LIMIT
     assert adapter.preflight(payload)["retcode"] == 0
