@@ -293,3 +293,22 @@ def test_ambiguous_submitting_state_blocks_new_setup_after_restart(tmp_path: Pat
     assert not coordinator.can_accept_new_setup("EURAUD")
     assert registry.get(setup.id).state is SetupState.ORDER_SUBMITTING
     store.close()
+
+def test_reconcile_detects_broker_ticket_mismatch(tmp_path: Path):
+    store = SetupStore(tmp_path / "state.sqlite3")
+    setup = make_setup()
+    store.upsert_setup(setup, SetupState.ORDER_PLACED, "2026-01-01T00:01:00Z", ticket=11)
+    mt5 = FakeMT5()
+    mt5.orders = [SimpleNamespace(ticket=12, magic=202609, comment="SMC SETUP-EURAUD-1-OB")]
+    registry = SetupRegistry()
+    coordinator = PersistentLifecycleCoordinator(
+        store, MT5LifecycleReconciler(mt5, 202609, registry), registry
+    )
+
+    results = coordinator.startup_reconcile("EURAUD")
+    assert len(results) == 1
+    assert results[0].kind == ReconciliationKind.BROKER_TICKET_MISMATCH
+    assert results[0].persisted_state is SetupState.ORDER_PLACED
+    assert results[0].ticket == 12
+    assert not coordinator.can_accept_new_setup("EURAUD")
+    store.close()
