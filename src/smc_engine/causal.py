@@ -152,7 +152,8 @@ class CausalMTFAnalyzer:
                     try:
                         setup = build_trade_setup(
                             self.symbol, context, sweep, csd, irl,
-                            risk_percent=self.config.risk_percent,\n                            created_time=event_time,
+                            risk_percent=self.config.risk_percent,
+                            created_time=event_time,
                         )
                     except ValueError:
                         continue
