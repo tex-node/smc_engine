@@ -486,7 +486,8 @@ def test_position_ticket_mismatch_is_not_silently_overwritten(tmp_path: Path):
     results = coordinator.startup_reconcile("EURAUD")
     assert len(results) == 1
     assert results[0].kind == ReconciliationKind.BROKER_POSITION_TICKET_MISMATCH
-    assert results[0].ticket == 11
+    assert results[0].ticket == 88
     assert results[0].position_ticket == 88
+    assert store.get(setup.id)["ticket"] == 11
     assert store.get(setup.id)["position_ticket"] == 77
     store.close()
