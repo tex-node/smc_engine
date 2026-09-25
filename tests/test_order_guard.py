@@ -41,8 +41,10 @@ class FakeMT5:
     def last_error(self):
         return (0, "ok")
 
+    TRADE_RETCODE_DONE = 10009
+
     def order_send(self, request):
-        return request
+        return SimpleNamespace(retcode=self.TRADE_RETCODE_DONE, request=request)
 
 
 def test_duplicate_setup_identity_is_detected():
@@ -70,3 +72,26 @@ def test_setup_identity_does_not_match_prefix_collision():
     mt5.orders = [SimpleNamespace(magic=202609, comment="SMC SETUP-X2")]
     guard = MT5OrderGuard(mt5, 202609)
     assert not guard.has_active_identity(setup())
+
+
+def test_cancel_pending_rejects_broker_failure():
+    mt5 = FakeMT5()
+
+    class RejectingMT5(FakeMT5):
+        def order_send(self, request):
+            return SimpleNamespace(retcode=10013)
+
+    guard = MT5OrderGuard(RejectingMT5(), 202609)
+    try:
+        guard.cancel_pending(123)
+    except RuntimeError as exc:
+        assert "retcode=10013" in str(exc)
+    else:
+        raise AssertionError("expected broker rejection to raise")
+
+
+def test_cancel_pending_accepts_done_retcodes():
+    mt5 = FakeMT5()
+    guard = MT5OrderGuard(mt5, 202609)
+    result = guard.cancel_pending(123)
+    assert result.retcode == mt5.TRADE_RETCODE_DONE
