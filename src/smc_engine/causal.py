@@ -101,7 +101,7 @@ class CausalMTFAnalyzer:
                     and swing_by_id[b.source_swing_id].index < sweep.candle_index
                     and swing_by_id[b.source_swing_id].confirmation_index <= sweep.candle_index
                 ]
-                csd = confirm_csd(h4_view, sweep, pre_sweep_breaks, self.config.h4_csd_window)
+                csd = confirm_csd(h4_view, sweep, pre_sweep_breaks, self.config.h4_csd_window, swings=h4_swings)
                 if csd is None:
                     continue
 
