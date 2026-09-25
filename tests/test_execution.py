@@ -57,3 +57,31 @@ def test_send_is_separate_from_preflight():
     )
     adapter.send(payload)
     assert mt5.sent == payload
+
+
+def test_preflight_rejects_nonzero_retcode():
+    class RejectingMT5(FakeMT5):
+        def order_check(self, request):
+            return {"retcode": 10014}
+    spec = SymbolSpec("TEST", 5, 0.00001, 0.00001, 1.0, 0.01, 100, 0.01, 10, 0, 0)
+    adapter = MT5ExecutionAdapter(RejectingMT5(), RiskEngine(spec))
+    payload = adapter.to_mt5_request(adapter.build_limit_request(make_setup(), 1000, 1.1002, 1.1003))
+    try:
+        adapter.preflight(payload)
+    except ValueError as exc:
+        assert "10014" in str(exc)
+    else:
+        raise AssertionError("expected preflight rejection")
+
+
+def test_broker_comment_rejects_unbounded_setup_identity():
+    spec = SymbolSpec("TEST", 5, 0.00001, 0.00001, 1.0, 0.01, 100, 0.01, 10, 0, 0)
+    adapter = MT5ExecutionAdapter(FakeMT5(), RiskEngine(spec))
+    setup = make_setup()
+    setup = TradeSetup(**{**setup.__dict__, "id": "SETUP-" + "X" * 40})
+    try:
+        adapter.build_limit_request(setup, 1000, 1.1002, 1.1003)
+    except ValueError as exc:
+        assert "too long" in str(exc)
+    else:
+        raise AssertionError("expected comment length rejection")
