@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-import MetaTrader5 as mt5
+try:\n    import MetaTrader5 as mt5\nexcept ImportError:  # pure-analysis/CI environments\n    class _MT5Constants:\n        TIMEFRAME_D1 = 16408\n        TIMEFRAME_H4 = 16388\n        TIMEFRAME_M15 = 15\n    mt5 = _MT5Constants()
 
 from .causal import CausalMTFAnalyzer
 from .lifecycle import SetupLifecycle, SetupRegistry
