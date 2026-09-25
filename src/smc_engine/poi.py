@@ -90,7 +90,7 @@ def build_d1_pois(
 
         pois.append(
             POI(
-                id=f"D1-POI-{i}",
+                id=f"D1-POI-{pd.Timestamp(row['time']).value}",
                 direction=direction,
                 timeframe="D1",
                 low=float(row["low"]),
