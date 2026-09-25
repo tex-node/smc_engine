@@ -328,3 +328,23 @@ def test_history_order_lookup_is_non_mutating(tmp_path: Path):
     assert history.ticket == 11
     assert history.state == 4
     store.close()
+
+def test_missing_broker_order_can_be_resolved_from_history_without_state_change(tmp_path: Path):
+    store = SetupStore(tmp_path / "state.sqlite3")
+    setup = make_setup()
+    store.upsert_setup(setup, SetupState.ORDER_PLACED, "2026-01-01T00:08:00Z", ticket=11)
+    mt5 = FakeMT5()
+    mt5.history_orders = {
+        11: SimpleNamespace(ticket=11, magic=202609, comment="SMC SETUP-EURAUD-1-OB", state=4)
+    }
+    registry = SetupRegistry()
+    coordinator = PersistentLifecycleCoordinator(
+        store, MT5LifecycleReconciler(mt5, 202609, registry), registry
+    )
+
+    result = coordinator.resolve_missing_broker_order(setup.id, "EURAUD")
+    assert result.kind == ReconciliationKind.HISTORICAL_ORDER_FOUND
+    assert result.ticket == 11
+    assert result.persisted_state is SetupState.ORDER_PLACED
+    assert store.get(setup.id)["state"] is SetupState.ORDER_PLACED
+    store.close()
