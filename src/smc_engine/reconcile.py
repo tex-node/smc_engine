@@ -83,3 +83,13 @@ class MT5LifecycleReconciler:
 
     def find_setup(self, symbol: str, setup_id: str) -> list[BrokerLifecycleRecord]:
         return [r for r in self.reconcile(symbol) if r.setup_id == setup_id]
+
+    def history_order(self, ticket: int) -> Any:
+        """Return the broker's historical order for a known ticket without changing lifecycle state."""
+        history_get = getattr(self.mt5, "history_orders_get", None)
+        if history_get is None:
+            return None
+        records = history_get(ticket=int(ticket))
+        if records is None:
+            raise RuntimeError(f"Unable to read order history for ticket {ticket}: {self.mt5.last_error()}")
+        return records[0] if records else None
