@@ -445,3 +445,48 @@ def test_position_recovery_requires_exactly_one_matching_position(tmp_path: Path
         raise AssertionError("Expected position recovery to require exactly one position")
     assert store.get(setup.id)["state"] is SetupState.ORDER_PLACED
     store.close()
+
+
+def test_position_managed_recovery_does_not_compare_order_ticket_to_position_ticket(tmp_path: Path):
+    store = SetupStore(tmp_path / "state.sqlite3")
+    setup = make_setup()
+    store.upsert_setup(setup, SetupState.POSITION_MANAGED, "2026-01-01T00:15:00Z", ticket=11)
+    mt5 = FakeMT5()
+    mt5.positions_ = [
+        SimpleNamespace(ticket=77, magic=202609, comment="SMC SETUP-EURAUD-1-OB")
+    ]
+    registry = SetupRegistry()
+    coordinator = PersistentLifecycleCoordinator(
+        store, MT5LifecycleReconciler(mt5, 202609, registry), registry
+    )
+
+    results = coordinator.startup_reconcile("EURAUD")
+    assert len(results) == 1
+    assert results[0].kind == ReconciliationKind.BROKER_POSITION_RECOVERY_AVAILABLE
+    assert results[0].ticket == 11
+    assert results[0].position_ticket == 77
+    assert store.get(setup.id)["ticket"] == 11
+    store.close()
+
+
+def test_position_ticket_mismatch_is_not_silently_overwritten(tmp_path: Path):
+    store = SetupStore(tmp_path / "state.sqlite3")
+    setup = make_setup()
+    store.upsert_setup(setup, SetupState.POSITION_MANAGED, "2026-01-01T00:16:00Z", ticket=11)
+    store.set_position_ticket(setup.id, 77)
+    mt5 = FakeMT5()
+    mt5.positions_ = [
+        SimpleNamespace(ticket=88, magic=202609, comment="SMC SETUP-EURAUD-1-OB")
+    ]
+    registry = SetupRegistry()
+    coordinator = PersistentLifecycleCoordinator(
+        store, MT5LifecycleReconciler(mt5, 202609, registry), registry
+    )
+
+    results = coordinator.startup_reconcile("EURAUD")
+    assert len(results) == 1
+    assert results[0].kind == ReconciliationKind.BROKER_POSITION_TICKET_MISMATCH
+    assert results[0].ticket == 11
+    assert results[0].position_ticket == 88
+    assert store.get(setup.id)["position_ticket"] == 77
+    store.close()
