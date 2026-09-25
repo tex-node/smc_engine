@@ -106,6 +106,8 @@ class PersistentLifecycleCoordinator:
                 ))
 
         for record in broker_records:
+            if len(records_by_setup[record.setup_id]) > 1:
+                continue
             row = persisted.get(record.setup_id)
             if row is None:
                 results.append(ReconciliationResult(
