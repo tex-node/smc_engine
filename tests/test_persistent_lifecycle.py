@@ -92,3 +92,20 @@ def test_reconcile_classifies_match_mismatch_and_missing(tmp_path: Path):
     result = coordinator.startup_reconcile("EURAUD")
     assert result[0].kind == ReconciliationKind.PERSISTED_MISSING_BROKER
     store.close()
+
+
+def test_startup_restores_persisted_lifecycle_into_registry(tmp_path: Path):
+    store = SetupStore(tmp_path / "state.sqlite3")
+    setup = make_setup()
+    store.upsert_setup(setup, SetupState.ORDER_PLACED, "2026-01-01T00:01:00Z", ticket=11)
+    mt5 = FakeMT5()
+    registry = SetupRegistry()
+    coordinator = PersistentLifecycleCoordinator(
+        store, MT5LifecycleReconciler(mt5, 202609, registry), registry
+    )
+    coordinator.startup_reconcile("EURAUD")
+    restored = registry.get(setup.id)
+    assert restored is not None
+    assert restored.state is SetupState.ORDER_PLACED
+    assert restored.setup == setup
+    store.close()
