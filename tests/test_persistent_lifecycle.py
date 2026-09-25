@@ -399,3 +399,49 @@ def test_reconcile_classifies_position_recovery_without_overwriting_order_ticket
     assert store.get(setup.id)["ticket"] == 11
     assert registry.get(setup.id).state is SetupState.ORDER_PLACED
     store.close()
+
+
+def test_explicit_position_recovery_advances_lifecycle_without_overwriting_order_ticket(tmp_path: Path):
+    store = SetupStore(tmp_path / "state.sqlite3")
+    setup = make_setup()
+    store.upsert_setup(setup, SetupState.ORDER_PLACED, "2026-01-01T00:11:00Z", ticket=11)
+    mt5 = FakeMT5()
+    mt5.positions_ = [
+        SimpleNamespace(ticket=77, magic=202609, comment="SMC SETUP-EURAUD-1-OB")
+    ]
+    registry = SetupRegistry()
+    coordinator = PersistentLifecycleCoordinator(
+        store, MT5LifecycleReconciler(mt5, 202609, registry), registry
+    )
+
+    result = coordinator.recover_position(
+        setup.id, "EURAUD", "2026-01-01T00:12:00Z"
+    )
+    assert result.kind == ReconciliationKind.BROKER_POSITION_RECOVERY_AVAILABLE
+    assert result.ticket == 77
+    assert registry.get(setup.id).state is SetupState.POSITION_MANAGED
+    row = store.get(setup.id)
+    assert row["ticket"] == 11
+    assert row["position_ticket"] == 77
+    store.close()
+
+
+def test_position_recovery_requires_exactly_one_matching_position(tmp_path: Path):
+    store = SetupStore(tmp_path / "state.sqlite3")
+    setup = make_setup()
+    store.upsert_setup(setup, SetupState.ORDER_PLACED, "2026-01-01T00:13:00Z", ticket=11)
+    mt5 = FakeMT5()
+    mt5.positions_ = []
+    registry = SetupRegistry()
+    coordinator = PersistentLifecycleCoordinator(
+        store, MT5LifecycleReconciler(mt5, 202609, registry), registry
+    )
+
+    try:
+        coordinator.recover_position(setup.id, "EURAUD", "2026-01-01T00:14:00Z")
+    except ValueError as exc:
+        assert "exactly one" in str(exc)
+    else:
+        raise AssertionError("Expected position recovery to require exactly one position")
+    assert store.get(setup.id)["state"] is SetupState.ORDER_PLACED
+    store.close()
