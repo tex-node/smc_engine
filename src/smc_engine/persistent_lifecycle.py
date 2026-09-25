@@ -263,6 +263,63 @@ class PersistentLifecycleCoordinator:
             getattr(history, "state", None),
         )
 
+    def recover_position(self, setup_id: str, symbol: str, event_time: object) -> ReconciliationResult:
+        """Explicitly recover a live broker position into the lifecycle.
+
+        Startup reconciliation only reports recoverable position evidence. This
+        operator-facing method requires exactly one matching position and then
+        advances the persisted lifecycle through FILLED to POSITION_MANAGED.
+        The original pending-order ticket remains untouched.
+        """
+        row = self.store.get(setup_id)
+        if row is None or row["symbol"] != symbol:
+            raise ValueError(f"Unknown persisted setup: {setup_id}")
+        if row["state"] not in {SetupState.ORDER_PLACED, SetupState.FILLED}:
+            raise ValueError(
+                f"Cannot recover position from lifecycle state {row['state'].value}"
+            )
+
+        records = [
+            record
+            for record in self.reconciler.reconcile(symbol)
+            if record.setup_id == setup_id and record.state is SetupState.POSITION_MANAGED
+        ]
+        if len(records) != 1:
+            raise ValueError(
+                f"Expected exactly one matching active position for {setup_id}, found {len(records)}"
+            )
+
+        position_ticket = int(records[0].ticket)
+        self.store.set_position_ticket(setup_id, position_ticket)
+        lifecycle = self.registry.get(setup_id)
+        if lifecycle is None:
+            setup = self.store.load_setup(setup_id)
+            if setup is None:
+                raise ValueError(f"Cannot load persisted setup: {setup_id}")
+            lifecycle = SetupLifecycle(setup, row["state"], row["reason"])
+            self.registry.add(lifecycle)
+
+        persistent = PersistentLifecycle(lifecycle, self.store)
+        if lifecycle.state is SetupState.ORDER_PLACED:
+            persistent.transition(
+                SetupState.FILLED,
+                event_time,
+                "explicit broker position recovery confirmed fill",
+            )
+        if lifecycle.state is SetupState.FILLED:
+            persistent.transition(
+                SetupState.POSITION_MANAGED,
+                event_time,
+                "explicit broker position recovery confirmed position",
+            )
+        return ReconciliationResult(
+            ReconciliationKind.BROKER_POSITION_RECOVERY_AVAILABLE,
+            setup_id,
+            SetupState.POSITION_MANAGED,
+            lifecycle.state,
+            position_ticket,
+        )
+
     def can_accept_new_setup(self, symbol: str) -> bool:
         broker_ids = self.reconciler.active_setup_ids(symbol)
         persisted = self.store.active(symbol)
