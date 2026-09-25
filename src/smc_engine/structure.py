@@ -62,12 +62,15 @@ def detect_structure_breaks(df: pd.DataFrame, swings: list[SwingPoint], start_in
         row = df.iloc[i]
         prior_highs = [s for s in highs if s.index < i]
         prior_lows = [s for s in lows if s.index < i]
-        if prior_highs and row["close"] > prior_highs[-1].price:
+        previous_close = float(df.iloc[i - 1]["close"])
+        if prior_highs:
             h = prior_highs[-1]
-            events.append(StructureEvent(f"BOS-H-{i}", StructureEventType.BOS, Direction.BULLISH, h.price, i, row["time"], h.id))
-        if prior_lows and row["close"] < prior_lows[-1].price:
+            if previous_close <= h.price < row["close"]:
+                events.append(StructureEvent(f"BOS-H-{i}", StructureEventType.BOS, Direction.BULLISH, h.price, i, row["time"], h.id))
+        if prior_lows:
             l = prior_lows[-1]
-            events.append(StructureEvent(f"BOS-L-{i}", StructureEventType.BOS, Direction.BEARISH, l.price, i, row["time"], l.id))
+            if previous_close >= l.price > row["close"]:
+                events.append(StructureEvent(f"BOS-L-{i}", StructureEventType.BOS, Direction.BEARISH, l.price, i, row["time"], l.id))
     return events
 
 def confirm_csd(
