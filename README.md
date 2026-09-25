@@ -173,3 +173,24 @@ The new execution boundary now provides:
 - preserved magic number 202609
 
 The legacy live bot is still isolated. The new adapter is intentionally not wired into live execution until replay/integration validation is complete.
+
+
+### Phase 7 — Setup lifecycle state machine
+
+Added `src/smc_engine/lifecycle.py` and `tests/test_lifecycle.py`.
+
+The new state machine prevents historical conditions from being treated as fresh setups on every polling cycle.
+
+States include:
+
+- EXECUTION_READY
+- ORDER_PREPARED
+- ORDER_PREFLIGHTED
+- ORDER_PLACED
+- FILLED
+- POSITION_MANAGED
+- CLOSED
+
+and explicit invalidation/rejection states for POI, OB, protected-level, entry, risk and broker failures.
+
+`SetupRegistry` provides in-process setup deduplication by setup ID and symbol. Persistence can replace the registry later without changing the state-machine contract.
