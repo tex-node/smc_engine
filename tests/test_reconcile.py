@@ -48,3 +48,9 @@ def test_reconciler_filters_other_magic_numbers():
         "SETUP-EURAUD-1-OB",
         "SETUP-EURAUD-2-OB",
     }
+
+
+def test_setup_id_parser_rejects_embedded_marker():
+    reconciler = MT5LifecycleReconciler(FakeMT5(), 202609, SetupRegistry())
+    assert reconciler.setup_id_from_comment("SMC NOTSETUP-EURAUD-1-OB") is None
+    assert reconciler.setup_id_from_comment("SMC SETUP-EURAUD-1-OB") == "SETUP-EURAUD-1-OB"
