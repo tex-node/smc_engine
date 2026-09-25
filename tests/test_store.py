@@ -64,3 +64,13 @@ def test_persist_transition_is_atomic_and_enum_safe(tmp_path: Path):
     assert saved["setup_json"]["direction"] == "BULLISH"
     assert saved["ticket"] == 123
     store.close()
+
+
+def test_persisted_setup_can_be_reconstructed(tmp_path: Path):
+    store = SetupStore(tmp_path / "state.sqlite3")
+    setup = make_setup()
+    store.upsert_setup(setup, SetupState.ORDER_PLACED, "2026-01-01T00:01:00Z", ticket=123)
+    restored = store.load_setup(setup.id)
+    assert restored == setup
+    assert restored.direction is Direction.BULLISH
+    store.close()
