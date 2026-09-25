@@ -1,5 +1,6 @@
 from pathlib import Path
 import sqlite3
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -95,7 +96,7 @@ def test_store_migrates_v2_schema_without_losing_setup(tmp_path: Path):
             "INSERT INTO setups(setup_id,symbol,state,created_time,updated_time,ticket,setup_json,reason) "
             "VALUES (?,?,?,?,?,?,?,?)",
             ("SETUP-EURAUD-1-OB", "EURAUD", "ORDER_PLACED", payload["created_time"],
-             "2026-01-01T00:01:00Z", 11, __import__("json").dumps(payload), "legacy"),
+             "2026-01-01T00:01:00Z", 11, json.dumps(payload), "legacy"),
         )
         conn.commit()
 
