@@ -47,7 +47,7 @@ def find_irl_target(
     if not candidates:
         return None
     s = candidates[0]
-    return IRLTarget(s.id, direction, s.price, s.index, s.time)
+    return IRLTarget(s.id, direction, s.price, s.index, s.time, s.confirmation_time)
 
 
 @dataclass(frozen=True)
