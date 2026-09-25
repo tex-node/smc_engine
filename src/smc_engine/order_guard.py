@@ -81,4 +81,14 @@ class MT5OrderGuard:
         result = self.mt5.order_send(request)
         if result is None:
             raise RuntimeError(f"Pending cancellation failed: {self.mt5.last_error()}")
+
+        retcode = getattr(result, "retcode", None)
+        if retcode is None and isinstance(result, dict):
+            retcode = result.get("retcode")
+        success = getattr(self.mt5, "TRADE_RETCODE_DONE", 10009)
+        if retcode != success:
+            raise RuntimeError(
+                f"Pending cancellation rejected by broker: retcode={retcode}, "
+                f"error={self.mt5.last_error()}"
+            )
         return result
