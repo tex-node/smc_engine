@@ -206,3 +206,45 @@ def test_submit_pending_leaves_submitting_on_ambiguous_send(tmp_path: Path):
     assert result.state is SetupState.ORDER_SUBMITTING
     assert store.get(lifecycle.setup.id)["state"] is SetupState.ORDER_SUBMITTING
     store.close()
+
+
+def test_duplicate_broker_identity_is_reconciliation_conflict(tmp_path: Path):
+    store = SetupStore(tmp_path / "state.sqlite3")
+    setup = make_setup()
+    store.upsert_setup(setup, SetupState.ORDER_PLACED, "2026-01-01T00:01:00Z", ticket=11)
+    mt5 = FakeMT5()
+    mt5.orders = [SimpleNamespace(ticket=11, magic=202609, comment="SMC SETUP-EURAUD-1-OB")]
+    mt5.positions_ = [SimpleNamespace(ticket=12, magic=202609, comment="SMC SETUP-EURAUD-1-OB")]
+    registry = SetupRegistry()
+    coordinator = PersistentLifecycleCoordinator(
+        store, MT5LifecycleReconciler(mt5, 202609, registry), registry
+    )
+
+    results = coordinator.startup_reconcile("EURAUD")
+    assert len(results) == 1
+    assert results[0].kind == ReconciliationKind.BROKER_IDENTITY_CONFLICT
+    assert results[0].setup_id == setup.id
+    store.close()
+
+
+def test_success_without_broker_ticket_stays_submitting(tmp_path: Path):
+    store = SetupStore(tmp_path / "state.sqlite3")
+    mt5 = FakeMT5()
+    registry = SetupRegistry()
+    lifecycle = __import__("src.smc_engine.lifecycle", fromlist=["SetupLifecycle"]).SetupLifecycle(make_setup())
+    registry.add(lifecycle)
+    coordinator = PersistentLifecycleCoordinator(store, MT5LifecycleReconciler(mt5, 202609, registry), registry)
+    spec = SymbolSpec("EURAUD", 5, 0.00001, 0.00001, 1.0, 0.01, 100, 0.01, 10, 0, 0)
+    lifecycle.setup = replace(lifecycle.setup, stop_loss=1.099)
+
+    class SuccessWithoutTicketExecution(MT5ExecutionAdapter):
+        def send(self, payload):
+            return {"retcode": self.mt5.TRADE_RETCODE_PLACED}
+
+    execution = SuccessWithoutTicketExecution(mt5, RiskEngine(spec))
+    result = coordinator.submit_pending(lifecycle, execution, 1000, 1.099, 1.1003, "2026-01-01T00:05:00Z")
+    assert result.state is SetupState.ORDER_SUBMITTING
+    assert result.ambiguous is True
+    assert lifecycle.state is SetupState.ORDER_SUBMITTING
+    assert store.get(lifecycle.setup.id)["state"] is SetupState.ORDER_SUBMITTING
+    store.close()
