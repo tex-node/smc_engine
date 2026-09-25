@@ -1,36 +1,32 @@
-
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional
 
-import pandas as pd
+import MetaTrader5 as mt5
 
+from .causal import CausalMTFAnalyzer
+from .lifecycle import SetupLifecycle, SetupRegistry
 from .market import MT5MarketData
-from .strategy import CandidateSetup, MultiTimeframeAnalyzer
-from .lifecycle import SetupRegistry, SetupLifecycle
+from .strategy import MultiTimeframeConfig
 
 
 @dataclass(frozen=True)
 class LiveAnalysis:
     symbol: str
-    candidate: Optional[CandidateSetup]
+    candidate: Optional[object]
     d1_bars: int
     h4_bars: int
     m15_bars: int
 
 
 class MT5Analyzer:
-    """Read-only live analyzer.
-
-    This class intentionally stops before order construction/sending. It is
-    the safe bridge between MT5 market data and the pure strategy engine.
-    """
+    """Read-only live bridge using the causal strategy engine."""
 
     def __init__(
         self,
         market: MT5MarketData,
-        strategy: MultiTimeframeAnalyzer,
+        strategy: CausalMTFAnalyzer,
         registry: Optional[SetupRegistry] = None,
         d1_count: int = 120,
         h4_count: int = 250,
@@ -44,12 +40,12 @@ class MT5Analyzer:
         self.m15_count = m15_count
 
     def analyze_once(self) -> LiveAnalysis:
-        d1 = self.market.closed_bars(16408, self.d1_count)
-        h4 = self.market.closed_bars(16388, self.h4_count)
-        m15 = self.market.closed_bars(15, self.m15_count)
+        d1 = self.market.closed_bars(mt5.TIMEFRAME_D1, self.d1_count)
+        h4 = self.market.closed_bars(mt5.TIMEFRAME_H4, self.h4_count)
+        m15 = self.market.closed_bars(mt5.TIMEFRAME_M15, self.m15_count)
 
-        candidate = self.strategy.analyze(d1, h4, m15)
-        selected = max(candidate, key=lambda x: x.setup.created_time) if candidate else None
+        candidates = self.strategy.analyze_at(d1, h4, m15)
+        selected = max(candidates, key=lambda x: x.setup.created_time) if candidates else None
 
         if selected is not None and not self.registry.has_active_for_symbol(self.strategy.symbol):
             self.registry.add(SetupLifecycle(selected.setup))
