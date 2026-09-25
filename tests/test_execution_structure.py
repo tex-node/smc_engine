@@ -56,3 +56,20 @@ def test_inducement_uses_directional_swing_after_order_block():
     assert len(idms) == 1
     assert idms[0].direction is Direction.BULLISH
     assert idms[0].level == 101
+
+
+
+def test_inducement_requires_swing_confirmation_by_as_of():
+    x = candles([
+        [1, 100, 101, 99, 100],
+        [2, 100, 102, 98, 99],
+        [3, 99, 103, 98, 102],
+        [4, 102, 104, 101, 103],
+        [5, 103, 105, 100, 104],
+    ])
+    blocks = find_order_blocks(x, [2])
+    late = SwingPoint("SL-3", 3, 4, SwingType.LOW, 101, 6, 4, 5)
+    early = SwingPoint("SL-3E", 3, 4, SwingType.LOW, 101, 6, 3, 4)
+
+    assert find_inducements(x, blocks, [late], as_of=4) == []
+    assert len(find_inducements(x, blocks, [early], as_of=4)) == 1
