@@ -9,6 +9,7 @@ from typing import Optional
 
 from .lifecycle import SetupState
 from .setup import TradeSetup
+from .models import Direction
 
 
 class SetupStore:
@@ -105,6 +106,18 @@ class SetupStore:
                    VALUES (?,?,?,?,?)""",
                 (setup.id, from_state.value, to_state.value, str(event_time), reason),
             )
+
+    @staticmethod
+    def setup_from_json(payload: dict) -> TradeSetup:
+        data = dict(payload)
+        data["direction"] = Direction(data["direction"])
+        return TradeSetup(**data)
+
+    def load_setup(self, setup_id: str) -> Optional[TradeSetup]:
+        row = self.get(setup_id)
+        if row is None:
+            return None
+        return self.setup_from_json(row["setup_json"])
 
     def get(self, setup_id: str) -> Optional[dict]:
         row = self._conn.execute(
