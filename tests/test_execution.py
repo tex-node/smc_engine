@@ -40,8 +40,10 @@ def test_build_and_preflight_pending_request():
     adapter = MT5ExecutionAdapter(mt5, RiskEngine(spec))
     req = adapter.build_limit_request(make_setup(), 1000, 1.1002, 1.1003)
     assert req.volume == 0.1
+    assert req.comment == "SMC SETUP-S"
     payload = adapter.to_mt5_request(req)
     assert payload["type"] == mt5.ORDER_TYPE_BUY_LIMIT
+    assert payload["comment"] == "SMC SETUP-S"
     assert adapter.preflight(payload)["retcode"] == 0
     assert mt5.checked == payload
 
