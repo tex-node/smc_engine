@@ -27,6 +27,14 @@ class POIState(str, Enum):
     INVALIDATED = "INVALIDATED"
     EXPIRED = "EXPIRED"
 
+class SetupState(str, Enum):
+    PENDING = "PENDING"
+    TRIGGERED = "TRIGGERED"
+    FILLED = "FILLED"
+    INVALIDATED = "INVALIDATED"
+    EXPIRED = "EXPIRED"
+    AMBIGUOUS = "AMBIGUOUS"
+
 @dataclass(frozen=True)
 class SwingPoint:
     id: str
