@@ -107,16 +107,18 @@ class SetupLifecycle:
 def evaluate_setup_lifecycle(setup: TradeSetup, df: pd.DataFrame, current_index: Optional[int] = None, expiry_bars: int = 20) -> SetupLifecycle:
     """Evaluate setup state using only candles strictly after setup creation.
 
-    Pending setups become TRIGGERED on entry touch, INVALIDATED on protected-level
-    breach, or EXPIRED after ``expiry_bars`` eligible candles. Triggered setups
-    become FILLED at target or INVALIDATED at stop. If a candle touches both
-    terminal levels, the result is AMBIGUOUS rather than assuming intrabar order.
+    The candle stream must be strictly chronological. Rejecting duplicate or
+    out-of-order timestamps prevents row-order-dependent lifecycle results.
     """
     required = {"time", "high", "low"}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"Missing columns: {sorted(missing)}")
     times = pd.to_datetime(df["time"], utc=True)
+    if times.duplicated().any():
+        raise ValueError("Candle timestamps must be unique")
+    if not times.is_monotonic_increasing:
+        raise ValueError("Candle timestamps must be strictly chronological")
     created = pd.Timestamp(setup.created_time)
     if created.tzinfo is None:
         created = created.tz_localize("UTC")
