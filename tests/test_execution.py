@@ -52,9 +52,7 @@ def test_send_is_separate_from_preflight():
     spec = SymbolSpec("TEST", 5, 0.00001, 0.00001, 1.0, 0.01, 100, 0.01, 10, 0, 0)
     mt5 = FakeMT5()
     adapter = MT5ExecutionAdapter(mt5, RiskEngine(spec))
-    payload = adapter.to_mt5_request(
-        adapter.build_limit_request(make_setup(), 1000, 1.1002, 1.1003)
-    )
+    payload = adapter.to_mt5_request(adapter.build_limit_request(make_setup(), 1000, 1.1002, 1.1003))
     adapter.send(payload)
     assert mt5.sent == payload
 
@@ -85,3 +83,25 @@ def test_broker_comment_rejects_unbounded_setup_identity():
         assert "too long" in str(exc)
     else:
         raise AssertionError("expected comment length rejection")
+
+
+def test_bullish_prices_are_normalized_conservatively():
+    spec = SymbolSpec("TEST", 5, 0.00001, 0.00001, 1.0, 0.01, 100, 0.01, 10, 0, 0)
+    adapter = MT5ExecutionAdapter(FakeMT5(), RiskEngine(spec))
+    setup = TradeSetup(**{**make_setup().__dict__, "entry": 1.100006, "stop_loss": 1.099994, "take_profit": 1.200004})
+    req = adapter.build_limit_request(setup, 1000, 1.1001, 1.1002)
+    assert req.price == 1.1
+    assert req.stop_loss == 1.09999
+    assert req.take_profit == 1.20001
+
+
+def test_normalized_entry_is_revalidated_against_market():
+    spec = SymbolSpec("TEST", 5, 0.00001, 0.00001, 1.0, 0.01, 100, 0.01, 10, 0, 0)
+    adapter = MT5ExecutionAdapter(FakeMT5(), RiskEngine(spec))
+    setup = make_setup()
+    try:
+        adapter.build_limit_request(setup, 1000, 1.09999, 1.1)
+    except ValueError as exc:
+        assert "no longer valid" in str(exc)
+    else:
+        raise AssertionError("expected normalized marketability rejection")
