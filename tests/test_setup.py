@@ -3,7 +3,7 @@ import pandas as pd
 
 from src.smc_engine.execution_structure import ExecutionContext, Inducement, OrderBlock
 from src.smc_engine.models import Direction, LiquiditySide, LiquiditySweep, POI, SetupState, StructureEvent, StructureEventType, SwingPoint, SwingType
-from src.smc_engine.setup import build_trade_setup, evaluate_setup_lifecycle, find_irl_target, resolve_setup_conflicts
+from src.smc_engine.setup import TradeSetup, SetupLifecycle, build_trade_setup, evaluate_setup_lifecycle, find_irl_target, resolve_setup_conflicts
 
 
 def swing(i, typ, price):
