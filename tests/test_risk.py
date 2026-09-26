@@ -2,7 +2,7 @@ import pytest
 
 from src.smc_engine.market import SymbolSpec
 from src.smc_engine.models import Direction
-from src.smc_engine.risk import RiskEngine, allocate_risk_budget, order_side, pending_price_is_valid
+from src.smc_engine.risk import RiskEngine, allocate_risk_budget, allocate_portfolio_risk_budget, order_side, pending_price_is_valid
 from src.smc_engine.setup import TradeSetup
 
 SPEC = SymbolSpec(symbol="TEST", digits=5, point=0.00001, tick_size=0.00001, tick_value=1.0, volume_min=0.01, volume_max=100.0, volume_step=0.01, trade_stops_level=10, trade_freeze_level=0, filling_mode=0)
@@ -44,3 +44,24 @@ def test_allocate_risk_budget_is_order_independent():
 def test_allocate_risk_budget_rejects_invalid_cap():
     with pytest.raises(ValueError):
         allocate_risk_budget([setup()], 0)
+
+def test_portfolio_risk_budget_reserves_existing_exposure():
+    a = setup(id="A", created=1, risk=1.0)
+    b = setup(id="B", created=2, risk=1.0)
+    c = setup(id="C", created=3, risk=1.0)
+    selected = allocate_portfolio_risk_budget([c, b, a], 1.0, 3.0)
+    assert [s.id for s in selected] == ["A", "B"]
+
+def test_portfolio_risk_budget_rejects_all_when_existing_exposure_at_cap():
+    assert allocate_portfolio_risk_budget([setup()], 3.0, 3.0) == []
+
+def test_portfolio_risk_budget_is_order_independent():
+    a = setup(id="A", created=1, risk=0.5)
+    b = setup(id="B", created=2, risk=1.0)
+    c = setup(id="C", created=3, risk=1.0)
+    selected = allocate_portfolio_risk_budget([c, a, b], 0.5, 2.0)
+    assert [s.id for s in selected] == ["A", "B"]
+
+def test_portfolio_risk_budget_rejects_negative_existing_risk():
+    with pytest.raises(ValueError):
+        allocate_portfolio_risk_budget([setup()], -0.1, 2.0)
