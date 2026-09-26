@@ -3,7 +3,7 @@ import pandas as pd
 
 from src.smc_engine.execution_structure import ExecutionContext, Inducement, OrderBlock
 from src.smc_engine.models import Direction, LiquiditySide, LiquiditySweep, POI, SetupState, StructureEvent, StructureEventType, SwingPoint, SwingType
-from src.smc_engine.setup import build_trade_setup, evaluate_setup_lifecycle, find_irl_target
+from src.smc_engine.setup import build_trade_setup, evaluate_setup_lifecycle, find_irl_target, resolve_setup_conflicts
 
 
 def swing(i, typ, price):
@@ -114,3 +114,27 @@ def test_setup_lifecycle_rejects_out_of_order_timestamps():
     ])
     with pytest.raises(ValueError, match="strictly chronological"):
         evaluate_setup_lifecycle(setup, df)
+
+
+def test_setup_conflicts_choose_earliest_created_setup_on_same_trigger_candle():
+    first = make_setup()
+    second = TradeSetup(
+        **{**first.__dict__, "id": "SETUP-EURAUD-13-OB-2", "created_time": pd.Timestamp("2025-12-31 23:59Z")}
+    )
+    lifecycles = {
+        first.id: SetupLifecycle(SetupState.TRIGGERED, 2, "2026-01-01 00:30Z", "entry"),
+        second.id: SetupLifecycle(SetupState.TRIGGERED, 2, "2026-01-01 00:30Z", "entry"),
+    }
+    result = resolve_setup_conflicts([first, second], lifecycles)
+    assert [s.id for s in result] == [second.id]
+
+
+def test_setup_conflicts_allow_different_trigger_candles():
+    first = make_setup()
+    second = TradeSetup(**{**first.__dict__, "id": "SETUP-EURAUD-14-OB-2"})
+    lifecycles = {
+        first.id: SetupLifecycle(SetupState.TRIGGERED, 2, "2026-01-01 00:30Z", "entry"),
+        second.id: SetupLifecycle(SetupState.TRIGGERED, 3, "2026-01-01 00:45Z", "entry"),
+    }
+    result = resolve_setup_conflicts([first, second], lifecycles)
+    assert {s.id for s in result} == {first.id, second.id}
