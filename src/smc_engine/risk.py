@@ -62,9 +62,6 @@ class RiskEngine:
         tick_value = Decimal(str(self.spec.tick_value))
         if tick_size <= 0 or tick_value <= 0:
             raise ValueError("broker tick size/value must be positive")
-        # Use Decimal arithmetic for fallback sizing. Float subtraction such as
-        # 1.10000 - 1.09900 can otherwise produce 99.999999... ticks and cause
-        # ROUND_DOWN to under-size an exact volume-step boundary.
         distance = abs(Decimal(str(entry)) - Decimal(str(stop_loss)))
         return float(distance / tick_size * tick_value)
 
@@ -104,4 +101,29 @@ def allocate_risk_budget(setups: list[TradeSetup], max_total_risk_percent: float
         if used + setup.risk_percent <= max_total_risk_percent + 1e-12:
             selected.append(setup)
             used += setup.risk_percent
+    return selected
+
+def allocate_portfolio_risk_budget(
+    setups: list[TradeSetup],
+    existing_risk_percent: float,
+    max_total_risk_percent: float,
+) -> list[TradeSetup]:
+    """Select new setups after reserving risk for existing exposure."""
+    if existing_risk_percent < 0:
+        raise ValueError("existing_risk_percent cannot be negative")
+    if max_total_risk_percent <= 0:
+        raise ValueError("max_total_risk_percent must be positive")
+    if existing_risk_percent > max_total_risk_percent:
+        return []
+    remaining = Decimal(str(max_total_risk_percent)) - Decimal(str(existing_risk_percent))
+    ordered = sorted(setups, key=lambda s: (s.created_time, -s.risk_reward, s.id))
+    selected: list[TradeSetup] = []
+    used = Decimal("0")
+    for setup in ordered:
+        if setup.risk_percent <= 0:
+            raise ValueError("setup risk_percent must be positive")
+        risk = Decimal(str(setup.risk_percent))
+        if used + risk <= remaining:
+            selected.append(setup)
+            used += risk
     return selected
