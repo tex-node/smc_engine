@@ -167,3 +167,42 @@ def evaluate_setup_lifecycle(setup: TradeSetup, df: pd.DataFrame, current_index:
             if filled:
                 return SetupLifecycle(SetupState.FILLED, i, row["time"], "take_profit_hit")
     return SetupLifecycle(state, None, None, "still_pending" if state is SetupState.PENDING else "position_open")
+
+
+def resolve_setup_conflicts(
+    setups: list[TradeSetup],
+    lifecycles: dict[str, SetupLifecycle],
+) -> list[TradeSetup]:
+    """Return a deterministic execution set for overlapping triggered setups.
+
+    Setups on different symbols or different trigger candles may coexist. When
+    multiple setups for the same symbol trigger on the same candle, only the
+    highest-priority setup is executable. Priority is stable and independent of
+    dataframe/list order: earliest creation time, then higher risk/reward, then
+    lexical setup id. Non-triggered setups are returned unchanged.
+    """
+    triggered: list[TradeSetup] = []
+    other: list[TradeSetup] = []
+    for setup in setups:
+        lifecycle = lifecycles.get(setup.id)
+        if lifecycle is not None and lifecycle.state is SetupState.TRIGGERED and lifecycle.event_index is not None:
+            triggered.append(setup)
+        else:
+            other.append(setup)
+
+    groups: dict[tuple[str, int], list[TradeSetup]] = {}
+    for setup in triggered:
+        lifecycle = lifecycles[setup.id]
+        groups.setdefault((setup.symbol, lifecycle.event_index), []).append(setup)
+
+    winners: list[TradeSetup] = []
+    for group in groups.values():
+        winners.append(min(
+            group,
+            key=lambda s: (
+                pd.Timestamp(s.created_time).value,
+                -s.risk_reward,
+                s.id,
+            ),
+        ))
+    return sorted(other + winners, key=lambda s: (pd.Timestamp(s.created_time).value, s.id))
