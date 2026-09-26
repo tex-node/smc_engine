@@ -69,7 +69,7 @@ def test_setup_lifecycle_triggers_then_fills():
 
 def test_setup_lifecycle_invalidates_before_entry():
     setup = make_setup()
-    df = candles([["2026-01-01 00:15Z", 101, 102, 93, 94]])
+    df = candles([["2026-01-01 00:15Z", 101, 99, 93, 94]])
     result = evaluate_setup_lifecycle(setup, df)
     assert result.state is SetupState.INVALIDATED
     assert result.reason == "protected_level_breached_before_entry"
