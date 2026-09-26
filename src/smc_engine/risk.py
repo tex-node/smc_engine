@@ -8,14 +8,12 @@ from .market import SymbolSpec
 from .models import Direction
 from .setup import TradeSetup
 
-
 @dataclass(frozen=True)
 class RiskQuote:
     volume: float
     estimated_loss: float
     requested_risk: float
     risk_percent: float
-
 
 @dataclass(frozen=True)
 class ExecutionConstraints:
@@ -25,80 +23,39 @@ class ExecutionConstraints:
     volume_step: float
     tick_size: float
 
-
 class RiskEngine:
-    """Broker-aware sizing and validation.
-
-    The optional MT5 module is used for an exact broker profit calculation when
-    available. The arithmetic tick-value estimate remains the fallback.
-    """
-
+    """Broker-aware sizing and validation."""
     def __init__(self, spec: SymbolSpec, mt5_module: Any = None):
         self.spec = spec
         self.mt5 = mt5_module
 
     def constraints(self) -> ExecutionConstraints:
         stop_level = max(self.spec.trade_stops_level, self.spec.trade_freeze_level)
-        return ExecutionConstraints(
-            min_stop_distance=stop_level * self.spec.point,
-            min_volume=self.spec.volume_min,
-            max_volume=self.spec.volume_max,
-            volume_step=self.spec.volume_step,
-            tick_size=self.spec.tick_size,
-        )
+        return ExecutionConstraints(stop_level * self.spec.point, self.spec.volume_min, self.spec.volume_max, self.spec.volume_step, self.spec.tick_size)
 
-    def volume_for_risk(
-        self,
-        balance: float,
-        risk_percent: float,
-        entry: float,
-        stop_loss: float,
-    ) -> RiskQuote:
+    def volume_for_risk(self, balance: float, risk_percent: float, entry: float, stop_loss: float) -> RiskQuote:
         if balance <= 0 or risk_percent <= 0:
             raise ValueError("balance and risk_percent must be positive")
         if entry == stop_loss:
             raise ValueError("entry and stop_loss cannot be equal")
         risk_money = Decimal(str(balance)) * Decimal(str(risk_percent)) / Decimal("100")
-        loss_per_lot = self._loss_per_lot_decimal(entry, stop_loss)
+        loss_per_lot = Decimal(str(self._loss_per_lot(entry, stop_loss)))
         if loss_per_lot <= 0:
             raise ValueError("calculated loss per lot must be positive")
-
         step = Decimal(str(self.spec.volume_step))
-        raw = risk_money / loss_per_lot
-        volume_decimal = (raw / step).to_integral_value(rounding=ROUND_DOWN) * step
-        volume = float(volume_decimal)
-
+        volume = float((risk_money / loss_per_lot / step).to_integral_value(rounding=ROUND_DOWN) * step)
         if volume < self.spec.volume_min:
-            raise ValueError(
-                f"Calculated volume {volume} is below broker minimum {self.spec.volume_min}; "
-                "trade rejected rather than increasing risk"
-            )
-        if volume > self.spec.volume_max:
-            volume = self.spec.volume_max
-
+            raise ValueError(f"Calculated volume {volume} is below broker minimum {self.spec.volume_min}; trade rejected rather than increasing risk")
+        volume = min(volume, self.spec.volume_max)
         estimated_loss = self._loss_for_volume(volume, entry, stop_loss)
         if estimated_loss > float(risk_money) * 1.000001:
             raise ValueError("broker-calculated loss exceeds requested risk")
         return RiskQuote(volume, estimated_loss, float(risk_money), risk_percent)
 
-    def _loss_per_lot_decimal(self, entry: float, stop_loss: float) -> Decimal:
-        if self.mt5 is not None:
-            value = self._loss_per_lot(entry, stop_loss)
-            return Decimal(str(value))
-        if self.spec.tick_size <= 0 or self.spec.tick_value <= 0:
-            raise ValueError("broker tick size/value must be positive")
-        distance = abs(Decimal(str(entry)) - Decimal(str(stop_loss)))
-        return distance / Decimal(str(self.spec.tick_size)) * Decimal(str(self.spec.tick_value))
-
     def _loss_per_lot(self, entry: float, stop_loss: float) -> float:
         if self.mt5 is not None:
-            order_type = (
-                self.mt5.ORDER_TYPE_BUY if entry > stop_loss
-                else self.mt5.ORDER_TYPE_SELL
-            )
-            value = self.mt5.order_calc_profit(
-                order_type, self.spec.symbol, 1.0, entry, stop_loss
-            )
+            order_type = self.mt5.ORDER_TYPE_BUY if entry > stop_loss else self.mt5.ORDER_TYPE_SELL
+            value = self.mt5.order_calc_profit(order_type, self.spec.symbol, 1.0, entry, stop_loss)
             if value is not None:
                 return abs(float(value))
         if self.spec.tick_size <= 0 or self.spec.tick_value <= 0:
@@ -107,13 +64,8 @@ class RiskEngine:
 
     def _loss_for_volume(self, volume: float, entry: float, stop_loss: float) -> float:
         if self.mt5 is not None:
-            order_type = (
-                self.mt5.ORDER_TYPE_BUY if entry > stop_loss
-                else self.mt5.ORDER_TYPE_SELL
-            )
-            value = self.mt5.order_calc_profit(
-                order_type, self.spec.symbol, volume, entry, stop_loss
-            )
+            order_type = self.mt5.ORDER_TYPE_BUY if entry > stop_loss else self.mt5.ORDER_TYPE_SELL
+            value = self.mt5.order_calc_profit(order_type, self.spec.symbol, volume, entry, stop_loss)
             if value is not None:
                 return abs(float(value))
         return self._loss_per_lot(entry, stop_loss) * volume
@@ -127,18 +79,23 @@ class RiskEngine:
         if setup.direction is Direction.BEARISH and not (setup.take_profit < setup.entry < setup.stop_loss):
             raise ValueError("Bearish setup geometry is invalid")
 
-    def _volume_digits(self) -> int:
-        step = f"{self.spec.volume_step:.10f}".rstrip("0")
-        return max(0, len(step.split(".")[1])) if "." in step else 0
-
-
 def order_side(direction: Direction) -> str:
-    """Return the MT5-independent side name for a directional setup."""
     return "BUY_LIMIT" if direction is Direction.BULLISH else "SELL_LIMIT"
 
-
 def pending_price_is_valid(direction: Direction, entry: float, bid: float, ask: float) -> bool:
-    """A limit entry must remain on the correct side of the live market."""
-    if direction is Direction.BULLISH:
-        return entry < ask
-    return entry > bid
+    return entry < ask if direction is Direction.BULLISH else entry > bid
+
+def allocate_risk_budget(setups: list[TradeSetup], max_total_risk_percent: float) -> list[TradeSetup]:
+    """Select setups without exceeding aggregate declared risk."""
+    if max_total_risk_percent <= 0:
+        raise ValueError("max_total_risk_percent must be positive")
+    ordered = sorted(setups, key=lambda s: (s.created_time, -s.risk_reward, s.id))
+    selected: list[TradeSetup] = []
+    used = 0.0
+    for setup in ordered:
+        if setup.risk_percent <= 0:
+            raise ValueError("setup risk_percent must be positive")
+        if used + setup.risk_percent <= max_total_risk_percent + 1e-12:
+            selected.append(setup)
+            used += setup.risk_percent
+    return selected
