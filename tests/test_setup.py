@@ -94,3 +94,23 @@ def test_setup_lifecycle_does_not_use_creation_candle():
     df = candles([["2026-01-01 00:00Z", 100, 111, 93, 100]])
     result = evaluate_setup_lifecycle(setup, df)
     assert result.state is SetupState.PENDING
+
+
+def test_setup_lifecycle_rejects_duplicate_timestamps():
+    setup = make_setup()
+    df = candles([
+        ["2026-01-01 00:15Z", 101, 103, 101, 102],
+        ["2026-01-01 00:15Z", 102, 105, 99, 101],
+    ])
+    with pytest.raises(ValueError, match="timestamps must be unique"):
+        evaluate_setup_lifecycle(setup, df)
+
+
+def test_setup_lifecycle_rejects_out_of_order_timestamps():
+    setup = make_setup()
+    df = candles([
+        ["2026-01-01 00:30Z", 101, 103, 101, 102],
+        ["2026-01-01 00:15Z", 102, 105, 99, 101],
+    ])
+    with pytest.raises(ValueError, match="strictly chronological"):
+        evaluate_setup_lifecycle(setup, df)
