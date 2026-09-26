@@ -58,9 +58,15 @@ class RiskEngine:
             value = self.mt5.order_calc_profit(order_type, self.spec.symbol, 1.0, entry, stop_loss)
             if value is not None:
                 return abs(float(value))
-        if self.spec.tick_size <= 0 or self.spec.tick_value <= 0:
+        tick_size = Decimal(str(self.spec.tick_size))
+        tick_value = Decimal(str(self.spec.tick_value))
+        if tick_size <= 0 or tick_value <= 0:
             raise ValueError("broker tick size/value must be positive")
-        return abs(entry - stop_loss) / self.spec.tick_size * self.spec.tick_value
+        # Use Decimal arithmetic for fallback sizing. Float subtraction such as
+        # 1.10000 - 1.09900 can otherwise produce 99.999999... ticks and cause
+        # ROUND_DOWN to under-size an exact volume-step boundary.
+        distance = abs(Decimal(str(entry)) - Decimal(str(stop_loss)))
+        return float(distance / tick_size * tick_value)
 
     def _loss_for_volume(self, volume: float, entry: float, stop_loss: float) -> float:
         if self.mt5 is not None:
