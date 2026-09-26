@@ -1,0 +1,353 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Optional
+
+from .lifecycle import SetupLifecycle, SetupRegistry, SetupState
+from .reconcile import MT5LifecycleReconciler
+from .store import SetupStore
+
+
+@dataclass
+class PersistentLifecycle:
+    lifecycle: SetupLifecycle
+    store: SetupStore
+
+    def transition(self, new_state: SetupState, event_time: object, reason: str, ticket: Optional[int] = None, position_ticket: Optional[int] = None) -> None:
+        previous = self.lifecycle.state
+        previous_reason = self.lifecycle.reason
+        self.lifecycle.transition(new_state, reason)
+        try:
+            self.store.persist_transition(self.lifecycle.setup, previous, new_state, event_time, reason, ticket=ticket, position_ticket=position_ticket)
+        except Exception:
+            self.lifecycle.state = previous
+            self.lifecycle.reason = previous_reason
+            raise
+
+    def persist(self, event_time: object, ticket: Optional[int] = None) -> None:
+        self.store.upsert_setup(
+            self.lifecycle.setup,
+            self.lifecycle.state,
+            event_time,
+            ticket=ticket,
+            reason=self.lifecycle.reason,
+        )
+
+
+@dataclass(frozen=True)
+class SubmissionResult:
+    state: SetupState
+    broker_result: Any = None
+    ticket: Optional[int] = None
+    ambiguous: bool = False
+
+class ReconciliationKind:
+    BROKER_ACTIVE_MATCH = "BROKER_ACTIVE_MATCH"
+    BROKER_ACTIVE_UNKNOWN = "BROKER_ACTIVE_UNKNOWN"
+    PERSISTED_MISSING_BROKER = "PERSISTED_MISSING_BROKER"
+    STATE_MISMATCH = "STATE_MISMATCH"
+    SUBMISSION_CONFIRMED = "SUBMISSION_CONFIRMED"
+    BROKER_IDENTITY_CONFLICT = "BROKER_IDENTITY_CONFLICT"
+    BROKER_TICKET_MISMATCH = "BROKER_TICKET_MISMATCH"
+    HISTORICAL_ORDER_FOUND = "HISTORICAL_ORDER_FOUND"
+    BROKER_POSITION_RECOVERY_AVAILABLE = "BROKER_POSITION_RECOVERY_AVAILABLE"
+    BROKER_POSITION_TICKET_MISMATCH = "BROKER_POSITION_TICKET_MISMATCH"
+
+
+@dataclass(frozen=True)
+class ReconciliationResult:
+    kind: str
+    setup_id: str
+    broker_state: Optional[SetupState] = None
+    persisted_state: Optional[SetupState] = None
+    ticket: Optional[int] = None
+    position_ticket: Optional[int] = None
+    historical_order_state: Optional[int] = None
+
+
+class PersistentLifecycleCoordinator:
+    """Startup/restart boundary joining SQLite strategy state and MT5 truth."""
+
+    def __init__(
+        self,
+        store: SetupStore,
+        reconciler: MT5LifecycleReconciler,
+        registry: SetupRegistry,
+    ):
+        self.store = store
+        self.reconciler = reconciler
+        self.registry = registry
+
+    def restore_persisted_active(self, symbol: str) -> list[SetupLifecycle]:
+        restored: list[SetupLifecycle] = []
+        for row in self.store.active(symbol):
+            setup = self.store.load_setup(row["setup_id"])
+            if setup is None:
+                continue
+            lifecycle = SetupLifecycle(setup, row["state"], row["reason"])
+            if self.registry.get(setup.id) is None:
+                self.registry.add(lifecycle)
+            restored.append(lifecycle)
+        return restored
+
+    def startup_reconcile(self, symbol: str) -> list[ReconciliationResult]:
+        self.restore_persisted_active(symbol)
+        broker_records = self.reconciler.reconcile(symbol)
+        broker_ids = {record.setup_id for record in broker_records}
+        persisted = {row["setup_id"]: row for row in self.store.active(symbol)}
+
+        results: list[ReconciliationResult] = []
+        records_by_setup: dict[str, list[Any]] = {}
+        for record in broker_records:
+            records_by_setup.setdefault(record.setup_id, []).append(record)
+
+        for setup_id, records in records_by_setup.items():
+            if len(records) > 1:
+                results.append(ReconciliationResult(
+                    ReconciliationKind.BROKER_IDENTITY_CONFLICT,
+                    setup_id,
+                    None,
+                    persisted.get(setup_id, {}).get("state"),
+                    None,
+                ))
+
+        for record in broker_records:
+            if len(records_by_setup[record.setup_id]) > 1:
+                continue
+            row = persisted.get(record.setup_id)
+            if row is None:
+                results.append(ReconciliationResult(
+                    ReconciliationKind.BROKER_ACTIVE_UNKNOWN,
+                    record.setup_id, record.state, None, record.ticket,
+                ))
+            elif row["state"] is SetupState.ORDER_SUBMITTING and record.state is SetupState.ORDER_PLACED:
+                lifecycle = self.registry.get(record.setup_id)
+                if lifecycle is not None:
+                    PersistentLifecycle(lifecycle, self.store).transition(
+                        SetupState.ORDER_PLACED,
+                        row["updated_time"],
+                        "startup reconciliation confirmed broker submission",
+                        ticket=record.ticket,
+                    )
+                results.append(ReconciliationResult(ReconciliationKind.SUBMISSION_CONFIRMED, record.setup_id, record.state, row["state"], record.ticket))
+            elif (
+                record.state is SetupState.ORDER_PLACED
+                and row["state"] is SetupState.ORDER_PLACED
+                and row["ticket"] is not None
+                and int(row["ticket"]) != int(record.ticket)
+            ):
+                results.append(ReconciliationResult(
+                    ReconciliationKind.BROKER_TICKET_MISMATCH,
+                    record.setup_id, record.state, row["state"], record.ticket,
+                ))
+            elif (
+                record.state is SetupState.POSITION_MANAGED
+                and row["state"] in {SetupState.ORDER_PLACED, SetupState.FILLED, SetupState.POSITION_MANAGED}
+            ):
+                persisted_position_ticket = row["position_ticket"]
+                if (
+                    persisted_position_ticket is not None
+                    and int(persisted_position_ticket) != int(record.ticket)
+                ):
+                    results.append(ReconciliationResult(
+                        ReconciliationKind.BROKER_POSITION_TICKET_MISMATCH,
+                        record.setup_id,
+                        record.state,
+                        row["state"],
+                        record.ticket,
+                        position_ticket=record.ticket,
+                    ))
+                else:
+                    # MT5 position tickets are not guaranteed to equal the
+                    # originating pending-order ticket. Identity/comment is the
+                    # durable correlation key; startup reconciliation must not
+                    # silently rewrite a previously established position identity.
+                    results.append(ReconciliationResult(
+                        ReconciliationKind.BROKER_POSITION_RECOVERY_AVAILABLE,
+                        record.setup_id,
+                        record.state,
+                        row["state"],
+                        record.ticket,
+                        position_ticket=record.ticket,
+                    ))
+            elif row["state"] is record.state:
+                results.append(ReconciliationResult(
+                    ReconciliationKind.BROKER_ACTIVE_MATCH,
+                    record.setup_id, record.state, row["state"], record.ticket,
+                ))
+            else:
+                results.append(ReconciliationResult(
+                    ReconciliationKind.STATE_MISMATCH,
+                    record.setup_id, record.state, row["state"], record.ticket,
+                ))
+        for setup_id, row in persisted.items():
+            if setup_id not in broker_ids:
+                results.append(ReconciliationResult(
+                    ReconciliationKind.PERSISTED_MISSING_BROKER,
+                    setup_id, None, row["state"], row["ticket"],
+                ))
+        return results
+
+    def submit_pending(self, lifecycle: SetupLifecycle, execution: Any, balance: float, bid: float, ask: float, event_time: object) -> SubmissionResult:
+        if lifecycle.state is SetupState.EXECUTION_READY:
+            PersistentLifecycle(lifecycle, self.store).transition(SetupState.ORDER_PREPARED, event_time, "pending order prepared")
+        if lifecycle.state is SetupState.ORDER_PREPARED:
+            request = execution.build_limit_request(lifecycle.setup, balance, bid, ask)
+            payload = execution.to_mt5_request(request)
+            execution.preflight(payload)
+            PersistentLifecycle(lifecycle, self.store).transition(SetupState.ORDER_PREFLIGHTED, event_time, "broker preflight passed")
+        elif lifecycle.state is SetupState.ORDER_PREFLIGHTED:
+            # A restart may have occurred after the previous preflight. Rebuild
+            # and re-preflight the exact request that will be submitted.
+            request = execution.build_limit_request(lifecycle.setup, balance, bid, ask)
+            payload = execution.to_mt5_request(request)
+            execution.preflight(payload)
+        else:
+            raise ValueError(f"Cannot submit lifecycle in state {lifecycle.state.value}")
+        PersistentLifecycle(lifecycle, self.store).transition(SetupState.ORDER_SUBMITTING, event_time, "durable submission intent recorded")
+        try:
+            broker_result = execution.send(payload)
+        except Exception as exc:
+            return SubmissionResult(SetupState.ORDER_SUBMITTING, broker_result=exc, ambiguous=True)
+        if broker_result is None:
+            return SubmissionResult(SetupState.ORDER_SUBMITTING, broker_result=execution.mt5.last_error(), ambiguous=True)
+        retcode = getattr(broker_result, "retcode", None)
+        if retcode is None and isinstance(broker_result, dict):
+            retcode = broker_result.get("retcode")
+        success_codes = set()
+        for name in ("TRADE_RETCODE_DONE", "TRADE_RETCODE_PLACED"):
+            value = getattr(execution.mt5, name, None)
+            if value is not None:
+                success_codes.add(value)
+        if retcode not in success_codes:
+            ambiguous_codes = {x for x in (getattr(execution.mt5, "TRADE_RETCODE_REQUOTE", None), getattr(execution.mt5, "TRADE_RETCODE_TIMEOUT", None), getattr(execution.mt5, "TRADE_RETCODE_CONNECTION", None)) if x is not None}
+            if retcode in ambiguous_codes:
+                return SubmissionResult(SetupState.ORDER_SUBMITTING, broker_result=broker_result, ambiguous=True)
+            PersistentLifecycle(lifecycle, self.store).transition(SetupState.BROKER_REJECTED, event_time, f"broker rejected pending order retcode={retcode}")
+            return SubmissionResult(SetupState.BROKER_REJECTED, broker_result=broker_result)
+        ticket = None
+        if isinstance(broker_result, dict):
+            ticket = broker_result.get("order") or broker_result.get("ticket")
+        else:
+            ticket = getattr(broker_result, "order", None) or getattr(broker_result, "ticket", None)
+        if ticket is None:
+            return SubmissionResult(
+                SetupState.ORDER_SUBMITTING,
+                broker_result=broker_result,
+                ambiguous=True,
+            )
+        PersistentLifecycle(lifecycle, self.store).transition(
+            SetupState.ORDER_PLACED,
+            event_time,
+            "broker accepted pending order",
+            ticket=int(ticket),
+        )
+        return SubmissionResult(SetupState.ORDER_PLACED, broker_result=broker_result, ticket=int(ticket))
+
+    def resolve_missing_broker_order(self, setup_id: str, symbol: str) -> ReconciliationResult:
+        """Inspect known broker history without changing lifecycle state."""
+        row = self.store.get(setup_id)
+        if row is None or row["symbol"] != symbol:
+            raise ValueError(f"Unknown persisted setup: {setup_id}")
+        ticket = row["ticket"]
+        if ticket is None:
+            raise ValueError(f"Setup {setup_id} has no persisted broker ticket")
+        history = self.reconciler.history_order(int(ticket))
+        if history is None:
+            return ReconciliationResult(
+                ReconciliationKind.PERSISTED_MISSING_BROKER,
+                setup_id,
+                None,
+                row["state"],
+                ticket,
+            )
+        historical_setup_id = self.reconciler.setup_id_from_comment(getattr(history, "comment", ""))
+        historical_ticket = int(getattr(history, "ticket", ticket))
+        historical_magic = getattr(history, "magic", None)
+        historical_symbol = getattr(history, "symbol", None)
+        if (
+            historical_setup_id != setup_id
+            or historical_ticket != int(ticket)
+            or (historical_magic is not None and int(historical_magic) != int(self.reconciler.magic))
+            or (historical_symbol is not None and str(historical_symbol) != symbol)
+        ):
+            return ReconciliationResult(
+                ReconciliationKind.BROKER_TICKET_MISMATCH,
+                setup_id,
+                None,
+                row["state"],
+                historical_ticket,
+                historical_order_state=getattr(history, "state", None),
+            )
+        return ReconciliationResult(
+            ReconciliationKind.HISTORICAL_ORDER_FOUND,
+            setup_id,
+            None,
+            row["state"],
+            historical_ticket,
+            historical_order_state=getattr(history, "state", None),
+        )
+
+    def recover_position(self, setup_id: str, symbol: str, event_time: object) -> ReconciliationResult:
+        """Explicitly recover a live broker position into the lifecycle.
+
+        Startup reconciliation only reports recoverable position evidence. This
+        operator-facing method requires exactly one matching position and then
+        advances the persisted lifecycle through FILLED to POSITION_MANAGED.
+        The original pending-order ticket remains untouched.
+        """
+        row = self.store.get(setup_id)
+        if row is None or row["symbol"] != symbol:
+            raise ValueError(f"Unknown persisted setup: {setup_id}")
+        if row["state"] not in {SetupState.ORDER_PLACED, SetupState.FILLED}:
+            raise ValueError(
+                f"Cannot recover position from lifecycle state {row['state'].value}"
+            )
+
+        records = [
+            record
+            for record in self.reconciler.reconcile(symbol)
+            if record.setup_id == setup_id and record.state is SetupState.POSITION_MANAGED
+        ]
+        if len(records) != 1:
+            raise ValueError(
+                f"Expected exactly one matching active position for {setup_id}, found {len(records)}"
+            )
+
+        position_ticket = int(records[0].ticket)
+        lifecycle = self.registry.get(setup_id)
+        if lifecycle is None:
+            setup = self.store.load_setup(setup_id)
+            if setup is None:
+                raise ValueError(f"Cannot load persisted setup: {setup_id}")
+            lifecycle = SetupLifecycle(setup, row["state"], row["reason"])
+            self.registry.add(lifecycle)
+
+        persistent = PersistentLifecycle(lifecycle, self.store)
+        if lifecycle.state is SetupState.ORDER_PLACED:
+            persistent.transition(
+                SetupState.FILLED,
+                event_time,
+                "explicit broker position recovery confirmed fill",
+                position_ticket=position_ticket,
+            )
+        if lifecycle.state is SetupState.FILLED:
+            persistent.transition(
+                SetupState.POSITION_MANAGED,
+                event_time,
+                "explicit broker position recovery confirmed position",
+                position_ticket=position_ticket,
+            )
+        return ReconciliationResult(
+            ReconciliationKind.BROKER_POSITION_RECOVERY_AVAILABLE,
+            setup_id,
+            SetupState.POSITION_MANAGED,
+            lifecycle.state,
+            position_ticket,
+        )
+
+    def can_accept_new_setup(self, symbol: str) -> bool:
+        broker_ids = self.reconciler.active_setup_ids(symbol)
+        persisted = self.store.active(symbol)
+        persisted_ids = {row["setup_id"] for row in persisted}
+        return not broker_ids and not persisted_ids

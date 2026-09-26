@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smc-engine"
+version = "0.2.0"
+description = "Deterministic Smart Money Concepts market-structure engine with MT5 adapters"
+requires-python = ">=3.10"
+dependencies = [
+  "MetaTrader5>=5.0.45",
+  "pandas>=2.0",
+  "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
