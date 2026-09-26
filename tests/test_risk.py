@@ -1,0 +1,67 @@
+import pytest
+
+from src.smc_engine.market import SymbolSpec
+from src.smc_engine.models import Direction
+from src.smc_engine.risk import RiskEngine, allocate_risk_budget, allocate_portfolio_risk_budget, order_side, pending_price_is_valid
+from src.smc_engine.setup import TradeSetup
+
+SPEC = SymbolSpec(symbol="TEST", digits=5, point=0.00001, tick_size=0.00001, tick_value=1.0, volume_min=0.01, volume_max=100.0, volume_step=0.01, trade_stops_level=10, trade_freeze_level=0, filling_mode=0)
+
+def setup(direction=Direction.BULLISH, id="S", created=1, risk=1.0, tp=1.2):
+    return TradeSetup(id=id, symbol="TEST", direction=direction, created_time=created, poi_id="P", sweep_id="SW", csd_id="CSD", protected_level=1.0, order_block_id="OB", inducement_id="IDM", entry=1.1, stop_loss=1.0, take_profit=tp, irl_swing_id="IRL", invalidation_level=1.0, risk_percent=risk)
+
+def test_risk_sizing_floors_to_volume_step():
+    q = RiskEngine(SPEC).volume_for_risk(1000, 1.0, 1.10000, 1.09900)
+    assert q.volume == 0.1
+    assert q.estimated_loss == pytest.approx(10.0)
+
+def test_minimum_volume_does_not_silently_increase_risk():
+    with pytest.raises(ValueError):
+        RiskEngine(SPEC).volume_for_risk(1, 1.0, 1.10000, 1.09900)
+
+def test_stop_distance_and_geometry_validation():
+    RiskEngine(SPEC).validate_setup(setup())
+    with pytest.raises(ValueError):
+        RiskEngine(SPEC).validate_setup(TradeSetup(**{**setup().__dict__, "stop_loss": 1.09999}))
+
+def test_pending_price_uses_live_bid_ask():
+    assert pending_price_is_valid(Direction.BULLISH, 1.0990, 1.1000, 1.1002)
+    assert not pending_price_is_valid(Direction.BULLISH, 1.1003, 1.1000, 1.1002)
+    assert pending_price_is_valid(Direction.BEARISH, 1.1010, 1.1000, 1.1002)
+    assert not pending_price_is_valid(Direction.BEARISH, 1.0990, 1.1000, 1.1002)
+
+def test_order_side():
+    assert order_side(Direction.BULLISH) == "BUY_LIMIT"
+    assert order_side(Direction.BEARISH) == "SELL_LIMIT"
+
+def test_allocate_risk_budget_is_order_independent():
+    a = setup(id="A", created=1, risk=1.0, tp=1.3)
+    b = setup(id="B", created=2, risk=1.0, tp=1.25)
+    c = setup(id="C", created=3, risk=1.0, tp=1.4)
+    selected = allocate_risk_budget([c, b, a], 2.0)
+    assert [s.id for s in selected] == ["A", "B"]
+
+def test_allocate_risk_budget_rejects_invalid_cap():
+    with pytest.raises(ValueError):
+        allocate_risk_budget([setup()], 0)
+
+def test_portfolio_risk_budget_reserves_existing_exposure():
+    a = setup(id="A", created=1, risk=1.0)
+    b = setup(id="B", created=2, risk=1.0)
+    c = setup(id="C", created=3, risk=1.0)
+    selected = allocate_portfolio_risk_budget([c, b, a], 1.0, 3.0)
+    assert [s.id for s in selected] == ["A", "B"]
+
+def test_portfolio_risk_budget_rejects_all_when_existing_exposure_at_cap():
+    assert allocate_portfolio_risk_budget([setup()], 3.0, 3.0) == []
+
+def test_portfolio_risk_budget_is_order_independent():
+    a = setup(id="A", created=1, risk=0.5)
+    b = setup(id="B", created=2, risk=1.0)
+    c = setup(id="C", created=3, risk=1.0)
+    selected = allocate_portfolio_risk_budget([c, a, b], 0.5, 2.0)
+    assert [s.id for s in selected] == ["A", "B"]
+
+def test_portfolio_risk_budget_rejects_negative_existing_risk():
+    with pytest.raises(ValueError):
+        allocate_portfolio_risk_budget([setup()], -0.1, 2.0)
