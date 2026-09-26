@@ -88,10 +88,12 @@ def test_broker_comment_rejects_unbounded_setup_identity():
 def test_bullish_prices_are_normalized_conservatively():
     spec = SymbolSpec("TEST", 5, 0.00001, 0.00001, 1.0, 0.01, 100, 0.01, 10, 0, 0)
     adapter = MT5ExecutionAdapter(FakeMT5(), RiskEngine(spec))
-    setup = TradeSetup(**{**make_setup().__dict__, "entry": 1.100006, "stop_loss": 1.099994, "take_profit": 1.200004})
+    # Keep the rounding-focused fixture valid against the broker's 10-point
+    # minimum stop distance after normalization.
+    setup = TradeSetup(**{**make_setup().__dict__, "entry": 1.100006, "stop_loss": 1.099906, "take_profit": 1.200004})
     req = adapter.build_limit_request(setup, 1000, 1.1001, 1.1002)
     assert req.price == 1.1
-    assert req.stop_loss == 1.09999
+    assert req.stop_loss == 1.0999
     assert req.take_profit == 1.20001
 
 
