@@ -74,8 +74,12 @@ class RiskEngine:
         return self._loss_per_lot(entry, stop_loss) * volume
 
     def validate_setup(self, setup: TradeSetup) -> None:
-        c = self.constraints()
-        if setup.risk_distance < c.min_stop_distance:
+        # Use Decimal for the broker-distance comparison so an exact stop-level
+        # boundary is not rejected because of binary floating-point representation.
+        stop_level = Decimal(str(max(self.spec.trade_stops_level, self.spec.trade_freeze_level)))
+        min_stop_distance = stop_level * Decimal(str(self.spec.point))
+        risk_distance = abs(Decimal(str(setup.entry)) - Decimal(str(setup.stop_loss)))
+        if risk_distance < min_stop_distance:
             raise ValueError("Stop distance violates broker stop/freeze distance")
         if setup.direction is Direction.BULLISH and not (setup.stop_loss < setup.entry < setup.take_profit):
             raise ValueError("Bullish setup geometry is invalid")
