@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from typing import Any
 
 from .models import Direction
@@ -29,12 +30,27 @@ class MT5ExecutionAdapter:
         self.risk = risk
         self.magic = magic
 
-    def _normalize_price(self, price: float) -> float:
+    def _normalize_price(self, price: float, rounding=ROUND_FLOOR) -> float:
         tick_size = self.risk.spec.tick_size or self.risk.spec.point
         if tick_size <= 0:
             raise ValueError("symbol tick size must be positive")
-        normalized = round(round(price / tick_size) * tick_size, self.risk.spec.digits)
-        return normalized
+        p = Decimal(str(price))
+        tick = Decimal(str(tick_size))
+        normalized = (p / tick).to_integral_value(rounding=rounding) * tick
+        return float(round(normalized, self.risk.spec.digits))
+
+    def _normalize_prices(self, setup: TradeSetup) -> tuple[float, float, float]:
+        if setup.direction is Direction.BULLISH:
+            return (
+                self._normalize_price(setup.entry, ROUND_FLOOR),
+                self._normalize_price(setup.stop_loss, ROUND_FLOOR),
+                self._normalize_price(setup.take_profit, ROUND_CEILING),
+            )
+        return (
+            self._normalize_price(setup.entry, ROUND_CEILING),
+            self._normalize_price(setup.stop_loss, ROUND_CEILING),
+            self._normalize_price(setup.take_profit, ROUND_FLOOR),
+        )
 
     def build_limit_request(
         self,
@@ -45,18 +61,25 @@ class MT5ExecutionAdapter:
         comment: str | None = None,
     ) -> PendingOrderRequest:
         self.risk.validate_setup(setup)
-        if not pending_price_is_valid(setup.direction, setup.entry, bid, ask):
-            raise ValueError("Limit entry is no longer valid at current market")
+        entry, stop_loss, take_profit = self._normalize_prices(setup)
 
-        quote = self.risk.volume_for_risk(balance, setup.risk_percent, setup.entry, setup.stop_loss)
+        # Validate the exact broker-facing price, not the pre-rounded strategy price.
+        if not pending_price_is_valid(setup.direction, entry, bid, ask):
+            raise ValueError("Limit entry is no longer valid at current market")
+        if setup.direction is Direction.BULLISH and not (stop_loss < entry < take_profit):
+            raise ValueError("Normalized bullish order geometry is invalid")
+        if setup.direction is Direction.BEARISH and not (take_profit < entry < stop_loss):
+            raise ValueError("Normalized bearish order geometry is invalid")
+
+        quote = self.risk.volume_for_risk(balance, setup.risk_percent, entry, stop_loss)
         filling = self._resolve_filling_mode()
         return PendingOrderRequest(
             symbol=setup.symbol,
             direction=setup.direction,
             volume=quote.volume,
-            price=self._normalize_price(setup.entry),
-            stop_loss=self._normalize_price(setup.stop_loss),
-            take_profit=self._normalize_price(setup.take_profit),
+            price=entry,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
             magic=self.magic,
             comment=comment or self._broker_comment(setup.id),
             filling_mode=filling,
