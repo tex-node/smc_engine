@@ -65,7 +65,10 @@ async function loadAnalysis(quiet) {
   }
 }
 async function loadSetups() {
-  try { S.setups = (await api("/api/setups")).setups || []; } catch (e) { S.setups = []; }
+  try {
+    const url = `/api/setups?symbol=${encodeURIComponent(S.symbol)}`;
+    S.setups = (await api(url)).setups || [];
+  } catch (e) { S.setups = []; }
   if (S.selected && !S.setups.find(s => s.setup_id === S.selected)) S.selected = null;
   renderLifecycle(); renderSetup();
 }

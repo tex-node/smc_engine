@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
-from .hub import LIVE_EXECUTION_ENABLED, TIMEFRAMES, MT5Source, EngineHub
+from .hub import TIMEFRAMES, EngineHub, MT5Source
 from .hub import _jsonable  # view-model serialization helper
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -104,26 +104,27 @@ def create_app(hub: Optional[EngineHub] = None) -> FastAPI:
 
     # ---------- setups / lifecycle ----------
     @app.get("/api/setups")
-    def setups():
-        rows = H().lifecycle()
-        return {"setups": _jsonable(rows)}
+    def setups(symbol: Optional[str] = None):
+        return {"setups": _jsonable(H().lifecycle(symbol))}
 
     @app.get("/api/setups/{setup_id}")
     def setup_detail(setup_id: str):
-        H()
         rows = [r for r in H().lifecycle() if r["setup_id"] == setup_id]
         if not rows:
             raise HTTPException(404, "unknown setup")
         return _jsonable(rows[0])
 
     @app.get("/api/lifecycle")
-    def lifecycle():
-        return {"states": _jsonable(H().lifecycle())}
+    def lifecycle(symbol: Optional[str] = None):
+        return {"states": _jsonable(H().lifecycle(symbol))}
 
     # ---------- risk ----------
     @app.get("/api/risk")
     def risk(symbol: str = "EURAUD", setup_id: Optional[str] = None):
-        return _jsonable(H().risk_snapshot(symbol, setup_id))
+        try:
+            return _jsonable(H().risk_snapshot(symbol, setup_id))
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
 
     # ---------- execution ----------
     @app.get("/api/execution/{setup_id}")
@@ -210,8 +211,6 @@ def create_app(hub: Optional[EngineHub] = None) -> FastAPI:
             try:
                 yield "retry: 3000\n\n"
                 while True:
-                    if hub and request is not None and asyncio_disconnected(request):
-                        break
                     try:
                         ev = q.get(timeout=15)
                         yield f"event: {ev['kind']}\ndata: {json.dumps(ev)}\n\n"
@@ -224,13 +223,6 @@ def create_app(hub: Optional[EngineHub] = None) -> FastAPI:
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     return app
-
-
-def asyncio_disconnected(request: Request) -> bool:
-    try:
-        return request.client is None and False
-    except Exception:
-        return False
 
 
 app = None

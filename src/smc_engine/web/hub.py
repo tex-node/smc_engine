@@ -12,7 +12,6 @@ engine primitives (structure/poi/fvg/execution_structure/setup/causal).
 from __future__ import annotations
 
 import json
-import os
 import queue
 import sqlite3
 import threading
@@ -25,16 +24,16 @@ from typing import Any, Optional
 import pandas as pd
 
 from ..causal import CausalMTFAnalyzer
-from ..execution_policy import ExecutionPolicy, MarketQuote
+from ..execution_policy import ExecutionPolicy
 from ..fvg import detect_fvgs
 from ..lifecycle import SetupLifecycle, SetupRegistry, SetupState as LCState
-from ..models import Direction
+from ..models import SetupState as ReplayState
 from ..poi import build_d1_pois, detect_displacement, update_poi_lifecycle
-from ..risk import RiskEngine, allocate_portfolio_risk_budget
+from ..risk import RiskEngine, allocate_portfolio_risk_budget, pending_price_is_valid
 from ..setup import TradeSetup
 from ..store import SetupStore
-from ..strategy import MultiTimeframeAnalyzer, MultiTimeframeConfig
-from ..execution_structure import execution_context, find_inducements, find_order_blocks
+from ..strategy import MultiTimeframeConfig
+from ..execution_structure import find_inducements, find_order_blocks
 from ..structure import (
     build_liquidity_pools,
     detect_structure_breaks,
@@ -50,6 +49,30 @@ TIMEFRAMES = {
 LIVE_EXECUTION_ENABLED = False  # hard compile-time gate for this phase
 MAX_TOTAL_RISK_PERCENT = 3.0
 DEMO_MARKERS = ("demo", "trial")
+
+
+def norm_symbol(symbol: str) -> str:
+    """Canonical symbol key used ONLY for hub-side comparison/filtering.
+
+    Uppercases and strips broker decoration (dots/whitespace) so an
+    'EURAUD.'-style suffix still resolves to the same base identity.
+    Broker-facing requests (bars/spec) keep the raw symbol unchanged.
+    """
+    return "".join(ch for ch in str(symbol).upper() if ch.isalnum())
+
+
+def canon_state(state) -> LCState:
+    """One canonical GUI lifecycle enum.
+
+    The replay models.SetupState shares member names (FILLED) with the
+    lifecycle machine, so cross-type values must be rejected explicitly
+    instead of silently coercing to the wrong state space.
+    """
+    if isinstance(state, ReplayState):
+        raise ValueError(f"replay state {state.value!r} is not GUI lifecycle state")
+    if isinstance(state, LCState):
+        return state
+    return LCState(state)
 
 
 def _jsonable(value: Any) -> Any:
@@ -341,11 +364,10 @@ class EngineHub:
         self.bars_cache: dict[tuple[str, int], tuple[float, pd.DataFrame]] = {}
         self.bars_ttl = 10.0
         self.watchlist: list[str] = []
-        self.setup_ids: dict[str, str] = {}  # display id -> setup id
-        self.paper_tickets: dict[str, int] = {}  # setup id -> ticket
+        self.registered_ids: set[str] = set()
+        self.paper_tickets: dict[str, int] = {}  # setup id -> broker ticket
         self._lock = threading.RLock()
         self.risk_engines: dict[str, RiskEngine] = {}
-        self.alerts_seq = 0
         self._poller: Optional[threading.Thread] = None
         self._stop = threading.Event()
 
@@ -449,7 +471,8 @@ class EngineHub:
             if self.registry.get(setup.id) is not None:
                 return
             self.registry.add(SetupLifecycle(setup))
-            self.setup_ids[setup.id] = setup.id
+            self.registered_ids.add(setup.id)
+            self.watch(setup.symbol)
             try:
                 self.store.upsert_setup(setup, LCState.EXECUTION_READY,
                                         pd.Timestamp.now(tz="UTC"))
@@ -462,9 +485,10 @@ class EngineHub:
 
     def watch(self, symbol: str) -> None:
         with self._lock:
-            if symbol not in self.watchlist:
-                self.watchlist.insert(0, symbol)
-                self.watchlist[:] = self.watchlist[:6]
+            if any(norm_symbol(w) == norm_symbol(symbol) for w in self.watchlist):
+                return
+            self.watchlist.insert(0, symbol)
+            self.watchlist[:] = self.watchlist[:6]
 
     # ---------- lifecycle ----------
     LADDER = {
@@ -479,16 +503,23 @@ class EngineHub:
         "BROKER_REJECTED": "INVALIDATED",
     }
 
-    def lifecycle(self) -> list[dict]:
+    def lifecycle(self, symbol: Optional[str] = None) -> list[dict]:
+        """Registered setups. `symbol` filters at this orchestration boundary:
+        an EURUSD view can never surface an XAUUSD setup, and broker-suffixed
+        names still match their base symbol."""
+        want = norm_symbol(symbol) if symbol else None
         rows = []
         with self._lock:
-            for sid in sorted(self.setup_ids):
+            for sid in sorted(self.registered_ids):
                 lc = self.registry.get(sid)
                 if lc is None:
                     continue
+                if want and norm_symbol(lc.setup.symbol) != want:
+                    continue
+                state = canon_state(lc.state)
                 rows.append({
                     "setup_id": sid, "symbol": lc.setup.symbol,
-                    "state": lc.state.value, "display": self.LADDER.get(lc.state.value, lc.state.value),
+                    "state": state.value, "display": self.LADDER[state.name],
                     "direction": lc.setup.direction.value,
                     "entry": lc.setup.entry, "sl": lc.setup.stop_loss, "tp": lc.setup.take_profit,
                     "risk_percent": lc.setup.risk_percent,
@@ -497,23 +528,29 @@ class EngineHub:
                 })
         return rows
 
-    def _transition(self, sid: str, to: LCState, reason: str) -> None:
+    def _transition(self, sid: str, to, reason: str) -> bool:
+        """Canonical, idempotent transition. Duplicate target states publish
+        nothing and change no accounting. Returns whether it was applied."""
         lc = self.registry.get(sid)
         if lc is None:
             raise ValueError(f"unknown setup {sid}")
-        lc.transition(to, reason)
+        target = canon_state(to)
+        if lc.state is target:
+            return False
+        lc.transition(target, reason)
         event_map = {
             LCState.ORDER_PREPARED: "ORDER_PREPARED", LCState.ORDER_PLACED: "ORDER_PLACED",
             LCState.PROTECTED_LEVEL_BREACHED: "SETUP_INVALIDATED",
             LCState.POI_INVALIDATED: "SETUP_INVALIDATED", LCState.OB_INVALIDATED: "SETUP_INVALIDATED",
             LCState.RISK_REJECTED: "SETUP_INVALIDATED", LCState.BROKER_REJECTED: "SETUP_INVALIDATED",
         }
-        if lc.state.value in ("PROTECTED_LEVEL_BREACHED", "POI_INVALIDATED", "OB_INVALIDATED",
-                              "RISK_REJECTED", "BROKER_REJECTED"):
+        if target.name in ("PROTECTED_LEVEL_BREACHED", "POI_INVALIDATED", "OB_INVALIDATED",
+                           "RISK_REJECTED", "BROKER_REJECTED"):
             self.web.add_alert(lc.setup.symbol, "causal", "SETUP_INVALIDATED",
                                f"{sid} invalidated: {reason}", level="WARN")
-        self.events.publish(event_map.get(to, "SETUP_UPDATED"),
+        self.events.publish(event_map.get(target, "SETUP_UPDATED"),
                             {"setup_id": sid, "state": lc.state.value})
+        return True
 
     # ---------- risk ----------
     def risk_engine(self, symbol: str) -> Optional[RiskEngine]:
@@ -549,6 +586,8 @@ class EngineHub:
         }
         if setup_id and re_:
             lc = self.registry.get(setup_id)
+            if lc and norm_symbol(lc.setup.symbol) != norm_symbol(symbol):
+                raise ValueError(f"setup {setup_id} belongs to {lc.setup.symbol}, not {symbol}")
             if lc:
                 try:
                     re_.validate_setup(lc.setup)
@@ -570,16 +609,19 @@ class EngineHub:
 
     # ---------- paper execution (backend-enforced) ----------
     def _paper_gate(self, request: dict) -> Optional[str]:
-        if not LIVE_EXECUTION_ENABLED and request.get("action") == "live":
-            return "live disabled"
+        """Allow-list gate. Anything not explicitly permitted is denied."""
         if not self.source.is_demo:
             return "account gate: non-demo broker"
         action = request.get("action")
         if action == "pending":
-            if request.get("symbol") not in self.watchlist + list(self.paper_tickets):
-                pass  # symbol authorization: only symbols the hub is tracking
-            if not request.get("symbol"):
+            symbol = request.get("symbol")
+            if not symbol:
                 return "no symbol"
+            tracked = {norm_symbol(w) for w in self.watchlist}
+            tracked |= {norm_symbol(self.registry.get(sid).setup.symbol)
+                        for sid in self.registered_ids if self.registry.get(sid)}
+            if norm_symbol(symbol) not in tracked:
+                return f"symbol {symbol} not authorized for this session"
             if request.get("type") not in ("BUY_LIMIT", "SELL_LIMIT"):
                 return "order type not allowed (market orders forbidden)"
             if not str(request.get("comment", "")).startswith("SMCGUI-"):
@@ -608,44 +650,48 @@ class EngineHub:
             return {"status": "DRY_RUN_REJECTED", "setup_id": setup_id, "reason": str(exc)}
 
     def paper_place(self, setup_id: str) -> dict:
-        if not LIVE_EXECUTION_ENABLED and not self.source.is_demo:
-            raise PermissionError("PAPER EXECUTION REJECTED: not a demo account")
-        lc = self.registry.get(setup_id)
-        if lc is None:
-            raise ValueError("unknown setup")
-        if lc.state.value != "EXECUTION_READY":
-            raise PermissionError(f"setup state {lc.state.value} cannot be placed")
-        re_ = self.risk_engine(lc.setup.symbol)
-        if re_ is None:
-            raise PermissionError("no broker metadata")
-        # risk + policy
-        re_.validate_setup(lc.setup)
-        acct = self.source.account() or {}
-        committed = self._committed_percent(exclude_setup_id=setup_id)
-        budget = allocate_portfolio_risk_budget([lc.setup], committed, MAX_TOTAL_RISK_PERCENT)
-        if not budget:
-            raise PermissionError("portfolio risk budget exhausted")
-        order = ExecutionPolicy(re_).build_order(lc.setup, float(acct.get("balance", 0) or 0))
-        self._transition(setup_id, LCState.ORDER_PREPARED, "paper prepared")
-        # broker preflight (real order_check)
-        tick = self.source.tick(lc.setup.symbol) or {}
-        mt5_req = {
-            "action": "pending", "symbol": lc.setup.symbol, "volume": order.volume,
-            "type": order.side, "price": order.entry, "sl": order.stop_loss,
-            "tp": order.take_profit, "magic": self.magic,
-            "comment": f"SMCGUI-{setup_id}"[:31],
-        }
-        reason = self._paper_gate(mt5_req)
-        if reason:
-            raise PermissionError(f"paper gate: {reason}")
-        try:
-            check = self.source.order_check(self._real_request(mt5_req, tick))
-            retcode = getattr(check, "retcode", getattr(check, "code", 0))
+        with self._lock:
+            if not self.source.is_demo:
+                raise PermissionError("PAPER EXECUTION REJECTED: not a demo account")
+            lc = self.registry.get(setup_id)
+            if lc is None:
+                raise ValueError("unknown setup")
+            if setup_id in self.paper_tickets:
+                raise PermissionError("setup already has an active paper ticket")
+            if lc.state is not LCState.EXECUTION_READY:
+                raise PermissionError(f"setup state {lc.state.value} cannot be placed")
+            re_ = self.risk_engine(lc.setup.symbol)
+            if re_ is None:
+                raise PermissionError("no broker metadata")
+            re_.validate_setup(lc.setup)
+            acct = self.source.account() or {}
+            committed = self._committed_percent(exclude_setup_id=setup_id)
+            budget = allocate_portfolio_risk_budget([lc.setup], committed, MAX_TOTAL_RISK_PERCENT)
+            if not budget:
+                raise PermissionError("portfolio risk budget exhausted")
+            order = ExecutionPolicy(re_).build_order(lc.setup, float(acct.get("balance", 0) or 0))
+            self._transition(setup_id, LCState.ORDER_PREPARED, "paper prepared")
+            # live re-check of entry against current quote (engine helper, not hub math)
+            tick = self.source.tick(lc.setup.symbol) or {}
+            bid, ask = float(tick.get("bid", 0) or 0), float(tick.get("ask", 0) or 0)
+            if bid and ask and not pending_price_is_valid(lc.setup.direction, order.entry, bid, ask):
+                raise PermissionError("entry no longer valid at current market")
+            virtual = {
+                "action": "pending", "symbol": lc.setup.symbol, "volume": order.volume,
+                "type": order.side, "price": order.entry, "sl": order.stop_loss,
+                "tp": order.take_profit, "magic": self.magic,
+                "comment": f"SMCGUI-{setup_id}"[:31],
+            }
+            reason = self._paper_gate(virtual)
+            if reason:
+                raise PermissionError(f"paper gate: {reason}")
+            check = self.source.order_check(self._real_request(virtual))
+            retcode = getattr(check, "retcode", None)
             if retcode not in (0, 10004):
                 raise ValueError(f"order_check retcode={retcode}")
             self._transition(setup_id, LCState.ORDER_PREFLIGHTED, "order_check ok")
             self._transition(setup_id, LCState.ORDER_SUBMITTING, "paper submit")
-            sent = self.source.order_send(self._real_request(mt5_req, tick))
+            sent = self.source.order_send(self._real_request(virtual))
             code = getattr(sent, "retcode", None)
             if code != 10009:
                 raise RuntimeError(f"broker rejected placement retcode={code} {getattr(sent,'comment','')}")
@@ -656,14 +702,13 @@ class EngineHub:
                 self.store.upsert_setup(lc.setup, LCState.ORDER_PLACED,
                                         pd.Timestamp.now(tz="UTC"), ticket=ticket)
             except Exception:
-                pass
+                import logging
+                logging.getLogger(__name__).exception("failed to persist placement %s", setup_id)
             self.web.add_alert(lc.setup.symbol, "causal", "ORDER_PLACED",
                                f"paper order placed ticket={ticket}", level="PAPER")
             return {"status": "ORDER_PLACED", "ticket": ticket, "order": asdict(order)}
-        finally:
-            pass
 
-    def _real_request(self, virtual: dict, tick: dict) -> dict:
+    def _real_request(self, virtual: dict) -> dict:
         try:
             import MetaTrader5 as mt5
             order_type = mt5.ORDER_TYPE_BUY_LIMIT if virtual["type"] == "BUY_LIMIT" else mt5.ORDER_TYPE_SELL_LIMIT
@@ -676,38 +721,54 @@ class EngineHub:
             raise RuntimeError("MT5 module unavailable; paper execution requires a broker terminal")
 
     def paper_cancel(self, setup_id: str) -> dict:
-        ticket = self.paper_tickets.get(setup_id)
-        if ticket is None:
-            raise ValueError("no paper ticket for setup")
-        reason = self._paper_gate({"action": "remove", "order": ticket})
-        if reason:
-            raise PermissionError(f"paper gate: {reason}")
-        import MetaTrader5 as mt5
-        sent = self.source.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": ticket})
-        if getattr(sent, "retcode", None) != 10009:
-            raise RuntimeError(f"cancel rejected retcode={getattr(sent,'retcode',None)}")
-        del self.paper_tickets[setup_id]
-        lc = self.registry.get(setup_id)
-        try:
-            lc.transition(LCState.CLOSED, "pending cancelled")
-        except Exception:
-            pass
-        self.events.publish("ORDER_CANCELLED", {"setup_id": setup_id, "ticket": ticket})
-        self.web.add_alert(lc.setup.symbol if lc else "?", "causal", "ORDER_CANCELLED",
-                           f"paper order cancelled ticket={ticket}", level="PAPER")
-        return {"status": "CANCELLED", "ticket": ticket}
+        with self._lock:
+            ticket = self.paper_tickets.get(setup_id)
+            lc = self.registry.get(setup_id)
+            if ticket is None:
+                if lc is not None and canon_state(lc.state) is LCState.CLOSED:
+                    return {"status": "ALREADY_CANCELLED", "ticket": None}
+                raise ValueError("no paper ticket for setup")
+            symbol = lc.setup.symbol if lc else None
+            # broker book is authoritative: if our ticket is gone, nothing to send
+            live = {o["ticket"] for o in self.source.pending_orders(symbol)
+                    if o.get("magic") == self.magic} if symbol else set()
+            if ticket not in live:
+                self.paper_tickets.pop(setup_id, None)
+                if lc is not None:
+                    try:
+                        self._transition(setup_id, LCState.CLOSED, "ticket no longer at broker")
+                    except Exception:
+                        pass
+                return {"status": "ALREADY_CANCELLED", "ticket": ticket}
+            reason = self._paper_gate({"action": "remove", "order": ticket})
+            if reason:
+                raise PermissionError(f"paper gate: {reason}")
+            import MetaTrader5 as mt5
+            sent = self.source.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": ticket})
+            if getattr(sent, "retcode", None) != 10009:
+                raise RuntimeError(f"cancel rejected retcode={getattr(sent,'retcode',None)}")
+            self.paper_tickets.pop(setup_id, None)
+            if lc is not None:
+                try:
+                    self._transition(setup_id, LCState.CLOSED, "pending cancelled")
+                except Exception:
+                    pass
+            self.events.publish("ORDER_CANCELLED", {"setup_id": setup_id, "ticket": ticket})
+            self.web.add_alert(symbol or "?", "causal", "ORDER_CANCELLED",
+                               f"paper order cancelled ticket={ticket}", level="PAPER")
+            return {"status": "CANCELLED", "ticket": ticket}
 
     def execution_state(self, setup_id: str) -> dict:
         lc = self.registry.get(setup_id)
         if lc is None:
             raise ValueError("unknown setup")
-        dry = None
         try:
             dry = self.dry_run(setup_id)
         except Exception as exc:
             dry = {"status": "UNAVAILABLE", "reason": str(exc)}
-        return {"setup_id": setup_id, "lifecycle": lc.state.value,
-                "display": self.LADDER.get(lc.state.value, lc.state.value),
+        state = canon_state(lc.state)
+        return {"setup_id": setup_id, "lifecycle": state.value,
+                "display": self.LADDER[state.name],
                 "ticket": self.paper_tickets.get(setup_id), "mode": "DRY RUN",
                 "account_mode": "DEMO" if self.source.is_demo else "DISCONNECTED/LIVE",
                 "dry_run": dry}
@@ -739,7 +800,6 @@ class EngineHub:
                 e, s_, t_ = d.get("entry"), d.get("stop_loss"), d.get("take_profit")
                 d["reward_risk"] = (round(abs(t_ - e) / abs(e - s_), 2)
                                     if None not in (e, s_, t_) and e != s_ else None)
-                d["direction"] = (d.get("direction") or "")
             except (ValueError, TypeError, KeyError, AttributeError) as exc:
                 import logging
                 logging.getLogger(__name__).warning("history row %s merge failed: %s", d.get("setup_id"), exc)
@@ -756,7 +816,6 @@ class EngineHub:
             while not self._stop.wait(interval):
                 for sym in list(self.watchlist):
                     try:
-                        before = {r["setup_id"] for r in self.lifecycle()}
                         cands = self.candidates_for(sym)
                         self.events.publish("MARKET_UPDATE", {"symbol": sym,
                                                               "candidates": len(cands)})
