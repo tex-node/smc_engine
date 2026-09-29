@@ -151,6 +151,7 @@ def test_paper_execution_blocked_without_demo(tmp_path):
 
 
 def test_paper_full_roundtrip_on_fake_demo(tmp_path):
+    pytest.importorskip("MetaTrader5")
     src = FakeDemoSource()
     client, hub = build_client(tmp_path, src)
     sid = "SETUP-PAPER-1"
@@ -177,6 +178,7 @@ def test_paper_full_roundtrip_on_fake_demo(tmp_path):
 
 
 def test_duplicate_paper_placement_refused(tmp_path):
+    pytest.importorskip("MetaTrader5")
     src = FakeDemoSource()
     client, hub = build_client(tmp_path, src)
     sid = "SETUP-DUP-1"
@@ -202,6 +204,7 @@ def test_hypothesis_crud(client):
 
 
 def test_alerts_and_history_endpoints(tmp_path):
+    pytest.importorskip("MetaTrader5")
     src = FakeDemoSource()
     client, hub = build_client(tmp_path, src)
     sid = "SETUP-HIST-1"

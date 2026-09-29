@@ -15,6 +15,8 @@ from tests.test_api import FakeDemoSource
 
 
 def test_gui_smoke(tmp_path):
+    import pytest
+    pytest.importorskip("MetaTrader5")
     src = FakeDemoSource()
     base = pd.Timestamp("2026-01-01", tz="UTC")
     rows = [[base + pd.Timedelta(hours=i), 100, 101, 99, 100] for i in range(60)]
