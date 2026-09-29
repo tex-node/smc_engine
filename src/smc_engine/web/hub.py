@@ -422,6 +422,17 @@ class EngineHub:
         pois = [update_poi_lifecycle(p, df) for p in build_d1_pois(df)]
         candidates = self.candidates_for(symbol)
         last = df.iloc[-1]
+        quote = {"market_data": "UNAVAILABLE", "bid": None, "ask": None, "spread": None,
+                 "tick_time": None, "source": self.source.name}
+        try:
+            t = self.source.tick(symbol)
+            if t is not None and t.get("bid") and t.get("ask"):
+                quote = {"market_data": "AVAILABLE", "bid": float(t["bid"]),
+                         "ask": float(t["ask"]),
+                         "spread": round(float(t["ask"]) - float(t["bid"]), 8),
+                         "tick_time": str(t.get("time")), "source": self.source.name}
+        except Exception:
+            pass
         snapshot = {
             "symbol": symbol, "timeframe": tf,
             "last_closed_time": str(last["time"]), "last_closed_close": float(last["close"]),
@@ -445,6 +456,8 @@ class EngineHub:
                       "time": str(p.created_time), "state": p.state.value}
                      for p in pois if p.state.value in ("ACTIVE", "TOUCHED")],
             "candidates": candidates,
+            "quote": quote,
+            "last_closed_candle_time": str(last["time"]),
             "candles": [[str(r.time), float(r.open), float(r.high), float(r.low), float(r.close)]
                         for r in df.itertuples()],
         }
@@ -453,6 +466,11 @@ class EngineHub:
         return snapshot
 
     def candidates_for(self, symbol: str) -> list[dict]:
+        """Causal engine output with its original evidence chain attached.
+
+        Only fields produced by the engine are serialized here. The GUI must
+        not infer, add, or substitute evidence; absent evidence is absent.
+        """
         out = []
         try:
             d1 = self.bars(symbol, "D1", 150)
@@ -463,7 +481,21 @@ class EngineHub:
         analyzer = CausalMTFAnalyzer(symbol, MultiTimeframeConfig())
         for cand in analyzer.analyze_at(d1, h4, m15)[-3:]:
             self.register_setup(cand.setup)
-            out.append(_setup_dict(cand.setup))
+            row = _setup_dict(cand.setup)
+            row["evidence"] = {
+                "poi_id": cand.setup.poi_id,
+                "sweep": {"id": cand.sweep.id, "side": cand.sweep.side.value,
+                          "swept_level": cand.sweep.swept_level,
+                          "sweep_extreme": cand.sweep.sweep_extreme,
+                          "time": str(cand.sweep.candle_time)},
+                "csd": {"id": cand.csd.id, "type": cand.csd.type.value,
+                        "direction": cand.csd.direction.value, "level": cand.csd.level,
+                        "time": str(cand.csd.candle_time)},
+                "order_block_id": cand.setup.order_block_id,
+                "inducement_id": cand.setup.inducement_id,
+                "irl_swing_id": cand.setup.irl_swing_id,
+            }
+            out.append(row)
         return out
 
     def register_setup(self, setup: TradeSetup) -> None:

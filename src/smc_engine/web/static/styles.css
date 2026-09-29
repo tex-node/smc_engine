@@ -52,6 +52,9 @@ input:focus,select:focus,textarea:focus{outline:1px solid var(--acc)}
 #center{display:flex;flex-direction:column;gap:10px;min-width:0}
 
 /* chart */
+#quote-strip{display:flex;gap:18px;padding:3px 6px;font-size:11px;color:var(--dim);border-bottom:1px solid var(--line)}
+#quote-strip .q b{color:var(--txt);font-weight:600}
+#quote-strip .down{color:var(--bear)}
 #chart-toolbar{display:flex;align-items:center;gap:14px}
 #tf-buttons{display:flex;gap:3px}
 #tf-buttons button{background:var(--bg2);border:1px solid var(--line2);color:var(--dim);padding:3px 9px;border-radius:4px}

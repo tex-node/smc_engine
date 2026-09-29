@@ -58,11 +58,34 @@ async function loadAnalysis(quiet) {
   try {
     S.analysis = await api(`/api/analysis/${S.symbol}/${S.tf}?count=250`);
     S.prices[S.symbol] = S.analysis.last_closed_close;
-    drawChart(); renderSetup(); renderRisk(); renderLifecycle();
+    drawChart(); renderQuote(); renderSetup(); renderRisk(); renderLifecycle();
   } catch (e) {
-    if (!quiet) toast(`market data: ${e.message}`, "err");
-    S.analysis = null; drawChart();
+    S.analysis = null;
+    renderQuote(null, e.message);
+    renderSetup(); renderLifecycle(); drawChart();
   }
+}
+
+function renderQuote(a, err) {
+  const el = $("#quote-strip");
+  if (!el) return;
+  if (!a) {
+    el.innerHTML = `<span class="q down">MARKET DATA UNAVAILABLE${err ? " — " + esc(err) : ""}</span>`;
+    return;
+  }
+  const q = a.quote || { market_data: "UNAVAILABLE" };
+  if (q.market_data !== "AVAILABLE") {
+    el.innerHTML = `<span class="q">SYMBOL ${esc(a.symbol)} · TF ${esc(a.timeframe)} · </span>` +
+      `<span class="q down">BID/ASK: MARKET DATA UNAVAILABLE</span>`;
+    return;
+  }
+  el.innerHTML =
+    `<span class="q">BID <b>${fmt(q.bid)}</b></span>` +
+    `<span class="q">ASK <b>${fmt(q.ask)}</b></span>` +
+    `<span class="q">SPREAD <b>${fmt(q.spread)}</b></span>` +
+    `<span class="q">LAST UPDATE <b>${esc(q.tick_time || a.last_closed_candle_time)}</b></span>` +
+    `<span class="q">SOURCE <b>${esc(q.source)}</b></span>` +
+    `<span class="q">STATE <b class="v bull">CONNECTED</b></span>`;
 }
 async function loadSetups() {
   try {
@@ -160,8 +183,8 @@ function drawChart() {
   const off = a.candles.length - vis;
   let hi = -Infinity, lo = Infinity;
   for (const c of candles) { hi = Math.max(hi, c[2]); lo = Math.min(lo, c[3]); }
-  const setup = activeSetup();
-  if (setup) { hi = Math.max(hi, setup.tp || 0, setup.entry); lo = Math.min(lo, setup.sl || Infinity, setup.entry); }
+  const setup = (setupModel().cand);
+  if (setup) { hi = Math.max(hi, setup.take_profit, setup.entry); lo = Math.min(lo, setup.stop_loss, setup.entry); }
   const rng = hi - lo || 1; hi += rng * 0.06; lo -= rng * 0.06;
   const X = (i) => padL + (i - off + 0.5) * cw;
   const Y = (p) => padT + (hi - p) / (hi - lo) * (H - padT - padB);
@@ -236,12 +259,12 @@ function drawChart() {
   if (setup && L("setup")) {
     const bull = setup.direction === "BULLISH";
     hline(setup.entry, "#4f8cff", `ENTRY ${fmt(setup.entry)}`);
-    hline(setup.sl, "#ef5350", `STOP ${fmt(setup.sl)}`);
-    hline(setup.tp, "#26a69a", `TARGET ${fmt(setup.tp)}`);
+    hline(setup.stop_loss, "#ef5350", `STOP ${fmt(setup.stop_loss)}`);
+    hline(setup.take_profit, "#26a69a", `TARGET ${fmt(setup.take_profit)}`);
     cx.fillStyle = bull ? "rgba(79,140,255,.07)" : "rgba(79,140,255,.07)";
-    cx.fillRect(padL, Math.min(Y(setup.tp), Y(setup.entry)), W - padR - padL, Math.abs(Y(setup.tp) - Y(setup.entry)));
+    cx.fillRect(padL, Math.min(Y(setup.take_profit), Y(setup.entry)), W - padR - padL, Math.abs(Y(setup.take_profit) - Y(setup.entry)));
     cx.fillStyle = "rgba(239,83,80,.08)";
-    cx.fillRect(padL, Math.min(Y(setup.sl), Y(setup.entry)), W - padR - padL, Math.abs(Y(setup.sl) - Y(setup.entry)));
+    cx.fillRect(padL, Math.min(Y(setup.stop_loss), Y(setup.entry)), W - padR - padL, Math.abs(Y(setup.stop_loss) - Y(setup.entry)));
   }
   function hline(p, col, label) {
     if (p == null) return; const y = Y(p);
@@ -278,69 +301,74 @@ cv.addEventListener("mouseleave", () => $("#tooltip").classList.add("hidden"));
 window.addEventListener("resize", () => drawChart());
 
 /* ---------------- panels ---------------- */
-function activeSetup() {
-  const sel = S.setups.find(s => s.setup_id === S.selected);
-  const base = sel || S.setups.find(s => ["EXECUTION_READY","ORDER_PREPARED","ORDER_PLACED"].includes(s.display)) || S.setups[0];
-  if (!base) return null;
-  const chart = S.analysis && (S.analysis.setup_view || {})[base.setup_id];
-  return { ...base, entry: base.entry, sl: base.sl, tp: base.tp };
+function setupModel() {
+  const cands = (S.analysis && S.analysis.candidates) || [];
+  const c = cands.find(x => x.id === S.selected) || cands[0] || null;
+  const row = c ? S.setups.find(s => s.setup_id === c.id) : null;
+  return { cand: c, row };
 }
 
 function renderSetup() {
   const box = $("#setup-body");
-  const st = activeSetup();
-  if (!st) { box.innerHTML = `<div class="empty">Engine has no ${S.symbol} setup at ${S.tf ? "causal MTF" : ""}.</div>`; return; }
-  const bull = st.direction === "BULLISH";
-  const a = S.analysis || {};
-  const marks = (kind, ok) => {
-    const has = (a[kind] || []).length;
-    return `<span class="${ok ? "v bull" : "v"}">${ok ? "✓" : "—"} ${kind}</span>`;
-  };
-  const sweepBull = (a.sweeps || []).some(w => w.side === "SELL_SIDE");
-  const sweepBear = (a.sweeps || []).some(w => w.side === "BUY_SIDE");
-  const fvgB = (a.fvgs || []).some(g => g.direction === "BULLISH" && g.state !== "MITIGATED");
-  const fvgS = (a.fvgs || []).some(g => g.direction === "BEARISH" && g.state !== "MITIGATED");
-  const obB = (a.order_blocks || []).some(b => b.direction === "BULLISH");
-  const obS = (a.order_blocks || []).some(b => b.direction === "BEARISH");
-  const lastBOS = (a.structure_events || []).filter(e => e.type !== "CSD").slice(-1)[0];
+  const { cand: c, row } = setupModel();
+  if (!c) {
+    const done = S.analysis ? S.analysis.last_closed_candle_time : null;
+    box.innerHTML = S.analysis
+      ? `<div class="empty" style="padding:10px 0">
+           <div style="color:var(--txt);font-weight:600;letter-spacing:.06em">NO CAUSAL SETUP DETECTED</div>
+           <div style="margin-top:4px">${esc(S.symbol)} · engine causal path (D1→H4→M15) is authoritative</div>
+           <div class="a-t">Analysis completed · last update ${esc(done || "—")}</div></div>`
+      : `<div class="empty">MARKET DATA UNAVAILABLE — engine not consulted.</div>`;
+    return;
+  }
+  const bull = c.direction === "BULLISH";
+  const ev = c.evidence || {};
+  const sw = ev.sweep || {}, csd = ev.csd || {};
+  const st = row || { display: "EXECUTION_READY" };
+  const rr = (c.reward_risk != null) ? Number(c.reward_risk).toFixed(2) : "—";
   box.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center">
-      <b>${esc(st.symbol)} · causal MTF</b><span class="chip ${st.display}">${st.display}</span></div>
+      <b>${esc(c.symbol)} · causal MTF</b><span class="chip ${st.display}">${st.display}</span></div>
     <div class="kv"><span class="k">Direction</span><span class="v ${bull ? "bull" : "bear"}">${bull ? "BULLISH SETUP ▲" : "BEARISH SETUP ▼"}</span></div>
-    <div class="kv"><span class="k">Structure</span><span class="v">${lastBOS ? esc(lastBOS.type + (lastBOS.direction === "BULLISH" ? " ↑" : " ↓")) : "—"}</span></div>
-    <div class="kv"><span class="k">Liquidity</span><span class="v">${bull ? (sweepBull ? "✓ sell-side sweep" : "no sweep on chart tf") : (sweepBear ? "✓ buy-side sweep" : "no sweep on chart tf")}</span></div>
-    <div class="kv"><span class="k">FVG</span><span class="v">${bull ? (fvgB ? "✓ bullish FVG" : "—") : (fvgS ? "✓ bearish FVG" : "—")}</span></div>
-    <div class="kv"><span class="k">Order Block</span><span class="v">${bull ? (obB ? "✓ demand OB" : "—") : (obS ? "✓ supply OB" : "—")}</span></div>
+    <div style="color:var(--faint);margin:4px 0 2px">structure evidence (engine)</div>
+    <div class="kv"><span class="k">Liquidity sweep</span><span class="v">${sw.side ? esc(sw.side.replace("_SIDE", "").replace("_", "-")) + " @ " + fmt(sw.swept_level) + " → " + fmt(sw.sweep_extreme) : "unavailable"}</span></div>
+    <div class="kv"><span class="k">CSD</span><span class="v">${csd.id ? esc(csd.type) + " " + esc((csd.direction || "").slice(0, 4)) + " @ " + fmt(csd.level) : "unavailable"}</span></div>
+    <div class="kv"><span class="k">D1 POI</span><span class="v">${ev.poi_id ? esc(ev.poi_id) : "unavailable"}</span></div>
+    <div class="kv"><span class="k">Order Block</span><span class="v">${ev.order_block_id ? esc(ev.order_block_id) : "unavailable"}</span></div>
+    <div class="kv"><span class="k">Inducement</span><span class="v">${ev.inducement_id ? esc(ev.inducement_id) : "unavailable"}</span></div>
+    <div class="kv"><span class="k">IRL target</span><span class="v">${ev.irl_swing_id ? esc(ev.irl_swing_id) : "unavailable"}</span></div>
+    <div class="kv"><span class="k">Protected level</span><span class="v">${fmt(c.protected_level)}</span></div>
+    <div class="kv"><span class="k">Invalidation</span><span class="v">${fmt(c.invalidation_level)}</span></div>
     <hr style="border-color:var(--line);margin:6px 0">
-    <div class="kv"><span class="k">Entry</span><span class="v">${fmt(st.entry)}</span></div>
-    <div class="kv"><span class="k">Stop</span><span class="v" style="color:var(--bear)">${fmt(st.sl)}</span></div>
-    <div class="kv"><span class="k">Target</span><span class="v" style="color:var(--bull)">${fmt(st.tp)}</span></div>
-    <div class="kv"><span class="k">R:R</span><span class="v">${fmt(st.reward_risk ?? st.reward_distance, 2)}</span></div>
-    <div class="kv"><span class="k">Risk</span><span class="v">${fmt(st.risk_percent, 2)}%</span></div>
-    <div class="kv"><span class="k">Setup ID</span><span class="v" style="color:var(--faint)">${esc(st.setup_id)}</span></div>
+    <div class="kv"><span class="k">Entry</span><span class="v">${fmt(c.entry)}</span></div>
+    <div class="kv"><span class="k">Stop</span><span class="v" style="color:var(--bear)">${fmt(c.stop_loss)}</span></div>
+    <div class="kv"><span class="k">Target</span><span class="v" style="color:var(--bull)">${fmt(c.take_profit)}</span></div>
+    <div class="kv"><span class="k">R:R</span><span class="v">${rr}</span></div>
+    <div class="kv"><span class="k">Risk</span><span class="v">${fmt(c.risk_percent, 2)}%</span></div>
+    <div class="kv"><span class="k">Setup ID</span><span class="v" style="color:var(--faint)">${esc(c.id)}</span></div>
     <div style="display:flex;gap:6px">
-      <button class="cta ok" id="btn-dry" ${S.selected === st.setup_id ? "" : "style='width:100%'"}>DRY RUN</button>
-      <button class="cta" id="btn-paper" ${S.mode === "PAPER" && S.status.paper_enabled && st.display === "EXECUTION_READY" ? "" : "disabled"}>PAPER PLACE</button>
+      <button class="cta ok" id="btn-dry">DRY RUN</button>
+      <button class="cta" id="btn-paper" ${S.mode === "PAPER" && S.status.paper_enabled && st.display === "EXECUTION_READY" ? "" : "disabled"}>PAPER EXECUTE</button>
     </div>
     <button class="cta danger hidden" id="btn-cancel">CANCEL PENDING</button>`;
-  S.selected = st.setup_id;
+  S.selected = c.id;
   $("#btn-dry").onclick = async () => {
-    try { const r = await api(`/api/dry-run/${st.setup_id}`, { method: "POST" });
+    try { const r = await api(`/api/dry-run/${c.id}`, { method: "POST" });
       toast(`${r.status}${r.order ? ` ${r.order.side} vol=${r.order.volume}` : (r.reason ? " " + r.reason : "")}`); }
     catch (e) { toast("dry-run: " + e.message, "err"); }
   };
   $("#btn-paper").onclick = async () => {
-    try { const r = await api(`/api/paper/${st.setup_id}`, { method: "POST" });
+    try { const r = await api(`/api/paper/${c.id}`, { method: "POST" });
       toast(`PAPER: ${r.status} ticket=${r.ticket}`, "ok"); loadSetups(); loadHistory(); }
     catch (e) { toast("paper: " + e.message, "err"); }
   };
   const cancelBtn = $("#btn-cancel");
-  if (st.ticket != null) {
+  if (row && row.ticket != null) {
     cancelBtn.classList.remove("hidden");
-    cancelBtn.textContent = `CANCEL PENDING #${st.ticket}`;
+    cancelBtn.textContent = `CANCEL PENDING #${row.ticket}`;
     cancelBtn.onclick = async () => {
-      try { const r = await api(`/api/paper/${st.setup_id}/cancel`, { method: "POST" });
-        toast(`cancelled ticket ${r.ticket}`); loadSetups(); loadHistory(); }
+      try { const r = await api(`/api/paper/${c.id}/cancel`, { method: "POST" });
+        toast(`${r.status} ticket ${r.ticket}`); loadSetups(); loadHistory(); }
       catch (e) { toast("cancel: " + e.message, "err"); }
     };
   }
