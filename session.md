@@ -4,7 +4,9 @@
 `tex-node/smc_engine` — Smart Money Concepts (Varis methodology) 3-layer engine on MT5, plus a browser workstation GUI. GitHub is the source of truth; local `C:\smc_engine` mirrors it.
 
 ## Where we are
-- **Branch `feature/gui-workstation`**, app commit `3991d38` (HEAD, pushed, CI green). Working tree clean.
+- **Branch `feature/gui-workstation`** HEAD `3eb8676` (docs) over app commit `3991d38` (CI green at app commit; branch pushed, tree clean).
+- **GATE A: PASS** — demo BUY_LIMIT ticket 3301052487 round-tripped; evidence log `%TEMP%\opencode\gate_a_result.log`.
+- **GATE B: BLOCKED — NO CAUSAL TRADESETUP** — all 22 Exness symbols return `candidates=0` (two samples); synthetic capability probe yields 1 genuine causal candidate (path alive); real feed reaches CSD (EURUSD×2, EURAUD×1, AUDUSD×1) with no completed M15 continuation. No order placed, no engine change. Resume when `/api/setups` shows a `SETUP-*` id.
 - Test suite: **143 passed** (engine + fvg + api + gui-smoke + orchestration + real-integration). Linux-sim: 27p/9s.
 - GUI workstation: running at `http://127.0.0.1:8765` attached to **Exness-MT5Trial9 demo** (login 477217728), `paper_enabled=True`, `live_execution_enabled=False`.
 
