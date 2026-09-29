@@ -346,6 +346,26 @@ Ambiguous states are surfaced for operator resolution; reconciliation does not s
 
 The persistence layer uses SQLite WAL mode, a busy timeout, schema metadata, indexes, enum-safe setup serialization, and atomic lifecycle-state/event writes.
 
+### Startup (GUI)
+
+```powershell
+# from C:\smc_engine with the project venv active
+python -m uvicorn smc_engine.web.api:create_app --factory --host 127.0.0.1 --port 8765
+# open http://127.0.0.1:8765
+```
+
+Optional env: `MT5_LOGIN/MT5_PASSWORD/MT5_SERVER/MT5_TERMINAL_PATH` (explicit demo
+login), `SMC_GUI_HOST`, `SMC_GUI_PORT`. Without MT5 credentials the GUI attaches to
+a running terminal; if none exists it starts in MT5 DISCONNECTED state. LIVE EXECUTION
+is compile-time disabled; paper endpoints require a demo/trial broker account and are
+gated server-side (order type, symbol, magic, session comment, ticket ownership).
+
+### Test suite
+
+```powershell
+python -m pytest -q     # engine + fvg + api + gui smoke
+```
+
 ### Validation status
 
 The repository has automated pytest coverage for the structure engine, POI lifecycle, execution structure, causal chronology, risk sizing, MT5 request construction, replay, dry-run orchestration, polling, persistence and restart reconciliation.

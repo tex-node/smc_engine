@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SMC ENGINE — Trading Workstation</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<header id="topbar">
+  <div class="brand">SMC&nbsp;ENGINE <span class="sub">Varis Methodology Workstation</span></div>
+  <div id="mode-selector">
+    <label class="mode-opt" data-mode="ANALYSIS"><input type="radio" name="mode" value="ANALYSIS" checked><span>ANALYSIS</span></label>
+    <label class="mode-opt" data-mode="DRY RUN"><input type="radio" name="mode" value="DRY_RUN"><span>DRY RUN</span></label>
+    <label class="mode-opt" data-mode="PAPER"><input type="radio" name="mode" value="PAPER"><span>PAPER / DEMO</span></label>
+    <label class="mode-opt live-off"><input type="radio" name="mode" value="LIVE" disabled><span>LIVE</span></label>
+  </div>
+  <div class="status-cluster">
+    <span id="account-badge" class="badge demo">…</span>
+    <span id="conn-badge" class="badge">…</span>
+    <span id="clock" class="clock"></span>
+  </div>
+</header>
+
+<div id="sys-strip">
+  <span>Engine <b id="s-engine">–</b></span>
+  <span>MT5 <b id="s-mt5">–</b></span>
+  <span>Account <b id="s-acct">–</b></span>
+  <span>Market Data <b id="s-md">–</b></span>
+  <span>Risk Engine <b id="s-risk">–</b></span>
+  <span>Execution <b id="s-exec">–</b></span>
+</div>
+
+<main id="layout">
+  <aside id="sidebar">
+    <div id="symbol-search-wrap"><input id="symbol-search" placeholder="Filter symbols…"></div>
+    <div id="symbol-list"></div>
+  </aside>
+
+  <section id="center">
+    <div id="chart-toolbar">
+      <div id="tf-buttons"></div>
+      <div id="chart-title"><span id="chart-symbol">—</span> <span id="chart-tf"></span>
+        <span id="chart-price" class="price"></span></div>
+      <div id="overlay-toggles">
+        <label><input type="checkbox" data-layer="swings" checked> swings</label>
+        <label><input type="checkbox" data-layer="events" checked> BOS/CHOCH</label>
+        <label><input type="checkbox" data-layer="sweeps" checked> sweeps</label>
+        <label><input type="checkbox" data-layer="fvgs" checked> FVG</label>
+        <label><input type="checkbox" data-layer="ob" checked> OB</label>
+        <label><input type="checkbox" data-layer="pois" checked> POI</label>
+        <label><input type="checkbox" data-layer="setup" checked> setup</label>
+      </div>
+    </div>
+    <div id="chart-wrap"><canvas id="chart"></canvas><div id="tooltip" class="hidden"></div></div>
+
+    <div id="panels">
+      <div class="panel" id="setup-panel">
+        <div class="panel-h">SETUP / SIGNAL</div>
+        <div id="setup-body" class="panel-b"><div class="empty">No setup detected by the engine.</div></div>
+      </div>
+      <div class="panel" id="risk-panel">
+        <div class="panel-h">PORTFOLIO RISK</div>
+        <div id="risk-body" class="panel-b"><div class="empty">—</div></div>
+      </div>
+      <div class="panel" id="exec-panel">
+        <div class="panel-h">EXECUTION</div>
+        <div id="exec-body" class="panel-b"><div class="empty">—</div></div>
+      </div>
+      <div class="panel" id="lifecycle-panel">
+        <div class="panel-h">LIFECYCLE</div>
+        <div id="lifecycle-body" class="panel-b"></div>
+      </div>
+    </div>
+  </section>
+
+  <aside id="rightbar">
+    <div class="panel">
+      <div class="panel-h">MARKET OBSERVER</div>
+      <div id="observer-body" class="panel-b"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-h">WEEKLY PLAN <button id="plan-new" class="mini">+ hypothesis</button></div>
+      <div id="plan-form" class="hidden">
+        <div class="grid2">
+          <label>Symbol<input id="p-symbol"></label>
+          <label>Timeframe<select id="p-tf"></select></label>
+          <label>Bias<select id="p-bias"><option>BULLISH</option><option>BEARISH</option></select></label>
+          <label>Target<input id="p-target"></label>
+        </div>
+        <label>Thesis<textarea id="p-thesis" rows="2"></textarea></label>
+        <div class="grid2">
+          <label>Trigger<input id="p-trigger"></label>
+          <label>Confirmation<input id="p-confirm"></label>
+        </div>
+        <label>Invalidation<input id="p-invalidate"></label>
+        <div><button id="p-save" class="cta">Save plan</button></div>
+      </div>
+      <div id="plan-list" class="panel-b"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-h">ALERTS</div>
+      <div id="alerts-body" class="panel-b feed"></div>
+    </div>
+  </aside>
+</main>
+
+<section id="history">
+  <div class="panel-h">SETUP HISTORY
+    <span id="hist-filters">
+      <select id="f-status"><option value="">All statuses</option></select>
+      <select id="f-dir"><option value="">All directions</option><option>BULLISH</option><option>BEARISH</option></select>
+      <input id="f-symbol" placeholder="symbol…">
+    </span>
+  </div>
+  <table id="hist-table"><thead><tr>
+    <th>Time</th><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>R:R</th><th>Risk</th><th>Status</th><th>Ticket</th>
+  </tr></thead><tbody></tbody></table>
+</section>
+
+<footer id="foot">LIVE EXECUTION DISABLED · backend enforces account/order gates · engine is the source of truth</footer>
+<script src="/static/app.js"></script>
+</body>
+</html>
