@@ -108,6 +108,7 @@ def test_duplicate_placement_and_event_one_ticket(tmp_path):
 
 
 def test_foreign_ticket_cancel_rejected(tmp_path):
+    pytest.importorskip("MetaTrader5")  # paper_place sends via broker constants
     _, hub = build_client(tmp_path, FakeDemoSource())
     hub.register_setup(make_setup("SET-OWN"))
     own = hub.paper_place("SET-OWN")
