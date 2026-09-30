@@ -4,10 +4,10 @@
 `tex-node/smc_engine` — Smart Money Concepts (Varis methodology) 3-layer engine on MT5, plus a browser workstation GUI. GitHub is the source of truth; local `C:\smc_engine` mirrors it.
 
 ## Where we are
-- **Branch `feature/gui-workstation`** HEAD `3eb8676` (docs) over app commit `3991d38` (CI green at app commit; branch pushed, tree clean).
+- **Branch `feature/gui-workstation`**, app lineage: `3991d38` (real-data GUI) → readiness slice (this commit, `feat(gui): add causal setup readiness monitoring`). CI green on lineage. Tree clean after this commit.
 - **GATE A: PASS** — demo BUY_LIMIT ticket 3301052487 round-tripped; evidence log `%TEMP%\opencode\gate_a_result.log`.
 - **GATE B: BLOCKED — NO CAUSAL TRADESETUP** — all 22 Exness symbols return `candidates=0` (two samples); synthetic capability probe yields 1 genuine causal candidate (path alive); real feed reaches CSD (EURUSD×2, EURAUD×1, AUDUSD×1) with no completed M15 continuation. No order placed, no engine change. Resume when `/api/setups` shows a `SETUP-*` id.
-- Test suite: **143 passed** (engine + fvg + api + gui-smoke + orchestration + real-integration). Linux-sim: 27p/9s.
+- Test suite: **150 passed** (engine + fvg + api + gui-smoke + orchestration + real-integration + 7 readiness). Linux-sim: 27p/9s.
 - GUI workstation: running at `http://127.0.0.1:8765` attached to **Exness-MT5Trial9 demo** (login 477217728), `paper_enabled=True`, `live_execution_enabled=False`.
 
 ## Session arc
@@ -23,6 +23,7 @@
    - Capability probe (synthetic complete-timeline specimen, engine unmodified): `CausalMTFAnalyzer.analyze_at` produced **1 genuine candidate** with full evidence chain (D1 POI → H4 sweep → CSD → M15 OB → IDM → IRL) — proving the path is alive, not dead.
    - Real-feed stage trace: EURUSD reaches CSD ×2, EURAUD ×1, AUDUSD ×1 — but no post-CSD M15 continuation completes currently. Honest market condition, not a defect.
    - Per §4/§36: no synthetic fallback, no injected setup, no order placed, no engine/GUI code changed. Gate B execution remains pending the first genuine causal setup (live poller on the GUI server watches registered symbols; GUI will show `NO CAUSAL SETUP DETECTED` until one appears).
+7. **GATE B READINESS LAYER** (observation-only): `/api/readiness` derived from the engine lifecycle (genuine `SETUP-*` id + complete fields only); GATE B strip in the workstation (WAITING → READY FOR MANUAL VALIDATION → REVIEW SETUP selects for inspection, never executes); dedup by backend setup id via localStorage (refresh-safe); readiness polling is read-only with zero broker calls; incomplete/foreign-id objects rejected at the hub boundary (`register_setup` completeness guard) and by readiness itself. Tests: 7 new (`tests/test_readiness.py`), full suite 150 green. Verified live on Exness demo: all symbols `WAITING_FOR_CAUSAL_SETUP`, `live_execution_enabled=false`, `/api/live` 403.
 
 ## Standing constraints
 - **LIVE EXECUTION DISABLED** — do not enable; `/api/live/*` 403; no live route; account + demo-server + paper gates remain mandatory.

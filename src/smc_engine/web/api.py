@@ -118,6 +118,40 @@ def create_app(hub: Optional[EngineHub] = None) -> FastAPI:
     def lifecycle(symbol: Optional[str] = None):
         return {"states": _jsonable(H().lifecycle(symbol))}
 
+    # ---------- readiness (OBSERVATION-ONLY; never executes) ----------
+    _READINESS_REQUIRED = ("setup_id", "symbol", "direction", "entry", "sl", "tp",
+                           "risk_percent", "state")
+
+    @app.get("/api/readiness")
+    def readiness(symbol: Optional[str] = None):
+        """Gate B readiness view derived from the engine lifecycle.
+
+        Presentation state only — deliberately NOT a lifecycle state.
+        A setup counts only when it is a genuine engine-causal id with
+        complete fields. Incomplete or foreign-id rows are rejected here
+        (and counted), never presented as executable. Detection paths call
+        no broker primitives; /api/setups stays read-only.
+        """
+        rows = H().lifecycle(symbol)
+        valid = [r for r in rows
+                 if str(r.get("setup_id", "")).startswith("SETUP-")
+                 and all(r.get(k) is not None and r.get(k) != "" for k in _READINESS_REQUIRED)]
+        if valid:
+            return _jsonable({
+                "status": "READY_FOR_MANUAL_VALIDATION",
+                "setup": valid[0],
+                "detected_ids": [r["setup_id"] for r in valid],
+                "rejected_incomplete": len(rows) - len(valid),
+                "mode": "GATE B WAITING FOR MANUAL VALIDATION — NO AUTO-EXECUTION",
+            })
+        return _jsonable({
+            "status": "WAITING_FOR_CAUSAL_SETUP",
+            "setup": None,
+            "detected_ids": [],
+            "rejected_incomplete": len(rows) - len(valid),
+            "mode": "OBSERVATION — VALID MARKET STATE, NOT AN ERROR",
+        })
+
     # ---------- risk ----------
     @app.get("/api/risk")
     def risk(symbol: str = "EURAUD", setup_id: Optional[str] = None):

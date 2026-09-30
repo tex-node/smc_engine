@@ -49,10 +49,11 @@ function wire() {
   ["f-status", "f-dir", "f-symbol"].forEach(id => $("#" + id).oninput = renderHistory);
   setInterval(() => { $("#clock").textContent = new Date().toISOString().slice(11, 19) + "Z"; }, 1000);
   setInterval(() => { if (!document.hidden) loadAnalysis(true); }, 20000);
+  setInterval(() => { if (!document.hidden) loadReadiness(); }, 45000);
 }
 
 /* ---------------- data loads ---------------- */
-async function refresh() { await Promise.all([loadAnalysis(), loadSetups(), loadAlerts(), loadHypotheses(), loadHistory()]); }
+async function refresh() { await Promise.all([loadAnalysis(), loadSetups(), loadAlerts(), loadHypotheses(), loadHistory(), loadReadiness()]); }
 
 async function loadAnalysis(quiet) {
   try {
@@ -99,6 +100,54 @@ async function loadAlerts() { try { renderAlerts((await api("/api/alerts?limit=5
 async function loadHypotheses() { try { renderObserver((await api("/api/hypotheses")).hypotheses); } catch (e) {} }
 async function loadHistory() { try { renderHistory((await api("/api/history")).rows); } catch (e) {} }
 
+/* ---------------- GATE B READINESS (observation only — never executes) ----------------
+   Consumes /api/readiness, which derives state from the engine lifecycle.
+   Dedup identity = backend setup_id. No frontend SMC math, no frontend ids. */
+let readinessPrimed = false;
+async function loadReadiness() {
+  try {
+    const r = await api(`/api/readiness${S.symbol ? "?symbol=" + encodeURIComponent(S.symbol) : ""}`);
+    S.readiness = r;
+    renderReadiness(r);
+    const first = !readinessPrimed; readinessPrimed = true;
+    for (const id of (r.detected_ids || [])) maybeNotifySetup(id, first);
+  } catch (e) {
+    // readiness endpoint unreachable: keep last calm state, do not alarm
+    renderReadiness({ status: "READINESS UNAVAILABLE (read-only layer)", setup: null, detected_ids: [] });
+  }
+}
+function maybeNotifySetup(id, silent) {
+  try {
+    const seen = JSON.parse(localStorage.getItem("smc_seen_setups") || "[]");
+    if (seen.includes(id)) return;              // one notification per backend identity
+    seen.push(id);
+    localStorage.setItem("smc_seen_setups", JSON.stringify(seen.slice(-200)));
+    if (!silent) toast(`CAUSAL SETUP DETECTED — ${id}. Gate B: ready for manual review.`);
+  } catch (e) {}
+}
+function renderReadiness(r) {
+  const strip = document.getElementById("gateb-strip");
+  if (!strip) return;
+  const ready = r.status === "READY_FOR_MANUAL_VALIDATION";
+  strip.className = ready ? "gateb-ready" : "gateb-waiting";
+  document.getElementById("gateb-status").textContent = ready
+    ? "READY FOR MANUAL VALIDATION" : r.status.replace(/_/g, " ");
+  document.getElementById("gateb-detail").textContent = ready
+    ? `${r.setup.setup_id} · ${r.setup.symbol} · ${r.setup.direction} · awaiting human review — no execution performed`
+    : "observation only — detection never executes";
+  const btn = document.getElementById("gateb-review");
+  btn.classList.toggle("hidden", !ready);
+  btn.onclick = () => reviewSetup(r.setup.setup_id);
+}
+function reviewSetup(id) {
+  // REVIEW = select & inspect. It must never place, check, or send anything.
+  S.selected = id;
+  renderSetup(); renderLifecycle(); renderRisk();
+  const p = document.getElementById("setup-panel");
+  if (p) p.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+
 /* ---------------- SSE ---------------- */
 function openStream() {
   const es = new EventSource("/api/events");
@@ -107,7 +156,7 @@ function openStream() {
     if (p.symbol === S.symbol && p.price) { S.prices[p.symbol] = p.price; updatePriceTag(p.price); }
   });
   ["SETUP_CREATED", "SETUP_UPDATED", "SETUP_INVALIDATED"].forEach(k =>
-    es.addEventListener(k, () => { loadSetups(); if (k !== "SETUP_UPDATED") { loadAnalysis(true); } }));
+    es.addEventListener(k, () => { loadSetups(); loadReadiness(); if (k !== "SETUP_UPDATED") { loadAnalysis(true); } }));
   ["ORDER_PREPARED", "ORDER_PLACED", "ORDER_CANCELLED"].forEach(k =>
     es.addEventListener(k, (ev) => { loadSetups(); loadHistory();
       toast(`${k}: ${JSON.parse(ev.data).payload.setup_id || ""}`); }));

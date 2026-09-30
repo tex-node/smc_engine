@@ -498,8 +498,22 @@ class EngineHub:
             out.append(row)
         return out
 
+    # Orchestration-boundary completeness guard. The engine's own
+    # build_trade_setup validates geometry; this protects the hub from
+    # manually injected/incomplete objects (readiness §5: reject, never crash).
+    _COMPLETE_FIELDS = ("id", "symbol", "direction", "entry", "stop_loss",
+                        "take_profit", "risk_percent", "protected_level")
+
     def register_setup(self, setup: TradeSetup) -> None:
         with self._lock:
+            if any(getattr(setup, f, None) is None
+                   or (isinstance(getattr(setup, f, None), float) and
+                       getattr(setup, f) != getattr(setup, f))  # NaN guard
+                   for f in self._COMPLETE_FIELDS):
+                import logging
+                logging.getLogger(__name__).warning(
+                    "rejected incomplete setup at orchestration boundary: %s", setup.id)
+                return
             if self.registry.get(setup.id) is not None:
                 return
             self.registry.add(SetupLifecycle(setup))

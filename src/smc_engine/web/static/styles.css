@@ -55,6 +55,15 @@ input:focus,select:focus,textarea:focus{outline:1px solid var(--acc)}
 #quote-strip{display:flex;gap:18px;padding:3px 6px;font-size:11px;color:var(--dim);border-bottom:1px solid var(--line)}
 #quote-strip .q b{color:var(--txt);font-weight:600}
 #quote-strip .down{color:var(--bear)}
+
+/* gate b readiness strip — OBSERVATION ONLY */
+#gateb-strip{display:flex;align-items:center;gap:14px;padding:4px 10px;font-size:11.5px;border:1px solid var(--line2);border-radius:4px;margin:4px 0}
+#gateb-strip .gb-label{letter-spacing:.14em;color:var(--dim);font-weight:700}
+#gateb-strip.gateb-waiting{border-color:var(--line2);color:var(--dim)}
+#gateb-strip.gateb-waiting #gateb-status{color:var(--dim)}
+#gateb-strip.gateb-ready{border-color:var(--acc);color:#fff;background:rgba(79,140,255,.10)}
+#gateb-strip.gateb-ready #gateb-status{color:var(--acc);font-weight:700}
+#gateb-detail{color:var(--faint);font-size:10.5px}
 #chart-toolbar{display:flex;align-items:center;gap:14px}
 #tf-buttons{display:flex;gap:3px}
 #tf-buttons button{background:var(--bg2);border:1px solid var(--line2);color:var(--dim);padding:3px 9px;border-radius:4px}
