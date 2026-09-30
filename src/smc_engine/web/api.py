@@ -119,9 +119,6 @@ def create_app(hub: Optional[EngineHub] = None) -> FastAPI:
         return {"states": _jsonable(H().lifecycle(symbol))}
 
     # ---------- readiness (OBSERVATION-ONLY; never executes) ----------
-    _READINESS_REQUIRED = ("setup_id", "symbol", "direction", "entry", "sl", "tp",
-                           "risk_percent", "state")
-
     @app.get("/api/readiness")
     def readiness(symbol: Optional[str] = None):
         """Gate B readiness view derived from the engine lifecycle.
@@ -132,25 +129,38 @@ def create_app(hub: Optional[EngineHub] = None) -> FastAPI:
         (and counted), never presented as executable. Detection paths call
         no broker primitives; /api/setups stays read-only.
         """
-        rows = H().lifecycle(symbol)
-        valid = [r for r in rows
-                 if str(r.get("setup_id", "")).startswith("SETUP-")
-                 and all(r.get(k) is not None and r.get(k) != "" for k in _READINESS_REQUIRED)]
-        if valid:
-            return _jsonable({
-                "status": "READY_FOR_MANUAL_VALIDATION",
-                "setup": valid[0],
-                "detected_ids": [r["setup_id"] for r in valid],
-                "rejected_incomplete": len(rows) - len(valid),
-                "mode": "GATE B WAITING FOR MANUAL VALIDATION — NO AUTO-EXECUTION",
-            })
-        return _jsonable({
-            "status": "WAITING_FOR_CAUSAL_SETUP",
-            "setup": None,
-            "detected_ids": [],
-            "rejected_incomplete": len(rows) - len(valid),
-            "mode": "OBSERVATION — VALID MARKET STATE, NOT AN ERROR",
-        })
+        return _jsonable(H().readiness(symbol))
+
+    # ---------- causal setup event history (read-only audit surface) ----------
+    @app.get("/api/setup-history")
+    def setup_history(symbol: Optional[str] = None, timeframe: Optional[str] = None,
+                      status: Optional[str] = None, setup_id: Optional[str] = None,
+                      limit: int = 50, before_id: Optional[int] = None):
+        """Strictly read-only audit query. No writes, no broker primitives."""
+        if status and status not in ("DETECTED", "ACTIVE", "EXPIRED", "CLOSED"):
+            raise HTTPException(400, "unknown history status")
+        return _jsonable(H().event_history.query(symbol=symbol, timeframe=timeframe,
+                                           status=status, setup_id=setup_id,
+                                           limit=limit, before_id=before_id))
+
+    @app.get("/api/setup-history/{setup_id}")
+    def setup_history_detail(setup_id: str):
+        res = H().event_history.query(setup_id=setup_id, limit=1)
+        if not res["events"]:
+            raise HTTPException(404, "no history event for setup")
+        event = res["events"][0]
+        event["timeline"] = H().event_history.timeline(setup_id)
+        return _jsonable({"event": event})
+
+    @app.post("/api/setup-history/{setup_id}/review")
+    def setup_history_review(setup_id: str):
+        """Record a manual review observation. No user-account system exists;
+        the action itself (manual, local session) is the identity. Never
+        executes anything."""
+        ok = H().event_history.mark_reviewed(setup_id)
+        if not ok:
+            raise HTTPException(404, "no history event for setup")
+        return _jsonable(H().event_history.query(setup_id=setup_id, limit=1)["events"][0])
 
     # ---------- risk ----------
     @app.get("/api/risk")

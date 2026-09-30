@@ -25,6 +25,8 @@
    - Per §4/§36: no synthetic fallback, no injected setup, no order placed, no engine/GUI code changed. Gate B execution remains pending the first genuine causal setup (live poller on the GUI server watches registered symbols; GUI will show `NO CAUSAL SETUP DETECTED` until one appears).
 7. **GATE B READINESS LAYER** (observation-only): `/api/readiness` derived from the engine lifecycle (genuine `SETUP-*` id + complete fields only); GATE B strip in the workstation (WAITING → READY FOR MANUAL VALIDATION → REVIEW SETUP selects for inspection, never executes); dedup by backend setup id via localStorage (refresh-safe); readiness polling is read-only with zero broker calls; incomplete/foreign-id objects rejected at the hub boundary (`register_setup` completeness guard) and by readiness itself. Tests: 7 new (`tests/test_readiness.py`), full suite 150 green. Verified live on Exness demo: all symbols `WAITING_FOR_CAUSAL_SETUP`, `live_execution_enabled=false`, `/api/live` 403.
 
+8. **CAUSAL SETUP EVENT HISTORY** (audit/observability): src/smc_engine/web/history.py — persistent SQLite setup_events (UNIQUE setup_id) + setup_event_timeline. Genuine engine identities only (SETUP-<SYMBOL>-<int>-OB-...); Gate A/test labels rejected. First detection = immutable snapshot (entry/stop/target/risk/rr/as_of/evidence JSON); re-observation updates last_seen/observations only; disappearance -> EXPIRED (NO LONGER PRESENT, distinct from real lifecycle breaches); CLOSED on terminal lifecycle; REVIVED on reappearance. Transitions observed via _transition, never invented. Paper outcomes recorded post-fact by the hub only. Read-only /api/setup-history[/{id}] + /review observation endpoint; GUI CAUSAL SETUP EVENTS panel with timeline detail; _safe_history failure isolation. Tests: 16 new, suite 166 green (Linux-sim 157p/9s). Live Exness: history empty = honest.
+
 ## Standing constraints
 - **LIVE EXECUTION DISABLED** — do not enable; `/api/live/*` 403; no live route; account + demo-server + paper gates remain mandatory.
 - Hub stays an orchestrator; no SMC/risk math in the frontend; setup IDs are the only handle the GUI passes to execution.
@@ -36,6 +38,6 @@
 cd C:\smc_engine
 .venv\Scripts\python.exe -m uvicorn smc_engine.web.api:create_app --factory --host 127.0.0.1 --port 8765
 # http://127.0.0.1:8765  (env MT5_LOGIN/PASSWORD/SERVER for explicit demo attach)
-python -m pytest -q      # 150 tests (incl. 7 readiness GUI-pipeline tests)
+python -m pytest -q      # 166 tests (engine + web + readiness + setup-history)
 ```
 Gate A evidence: `%TEMP%\opencode\gate_a_result.log`. Gate B traces/probes: `%TEMP%\opencode\gate_b_*.py|log` (not application code).

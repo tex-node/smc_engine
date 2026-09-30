@@ -49,11 +49,11 @@ function wire() {
   ["f-status", "f-dir", "f-symbol"].forEach(id => $("#" + id).oninput = renderHistory);
   setInterval(() => { $("#clock").textContent = new Date().toISOString().slice(11, 19) + "Z"; }, 1000);
   setInterval(() => { if (!document.hidden) loadAnalysis(true); }, 20000);
-  setInterval(() => { if (!document.hidden) loadReadiness(); }, 45000);
+  setInterval(() => { if (!document.hidden) { loadReadiness(); loadCausalEvents(); } }, 45000);
 }
 
 /* ---------------- data loads ---------------- */
-async function refresh() { await Promise.all([loadAnalysis(), loadSetups(), loadAlerts(), loadHypotheses(), loadHistory(), loadReadiness()]); }
+async function refresh() { await Promise.all([loadAnalysis(), loadSetups(), loadAlerts(), loadHypotheses(), loadHistory(), loadReadiness(), loadCausalEvents()]); }
 
 async function loadAnalysis(quiet) {
   try {
@@ -143,8 +143,76 @@ function reviewSetup(id) {
   // REVIEW = select & inspect. It must never place, check, or send anything.
   S.selected = id;
   renderSetup(); renderLifecycle(); renderRisk();
+  // record the manual review as an observation (never executes)
+  api(`/api/setup-history/${encodeURIComponent(id)}/review`, { method: "POST" })
+    .then(() => loadCausalEvents()).catch(() => {});
   const p = document.getElementById("setup-panel");
   if (p) p.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+/* ---------------- CAUSAL SETUP EVENT HISTORY (read-only audit surface) ---------------- */
+async function loadCausalEvents() {
+  try {
+    const r = await api(`/api/setup-history?symbol=${encodeURIComponent(S.symbol)}&limit=25`);
+    renderCausalEvents(r.events || []);
+  } catch (e) { renderCausalEvents(null, e.message); }
+}
+function renderCausalEvents(events, err) {
+  const box = $("#causal-events");
+  if (!box) return;
+  if (err) { box.innerHTML = `<div class="empty">history unavailable: ${esc(err)}</div>`; return; }
+  if (!events.length) {
+    box.innerHTML = `<div class="empty">No causal setup events yet — normal market state.<br>` +
+      `Engine history fills only when a genuine SETUP-* appears.</div>`;
+    $("#causal-detail").classList.add("hidden");
+    return;
+  }
+  box.innerHTML = events.map(ev => `
+    <div class="alert" data-causal="${esc(ev.setup_id)}" style="cursor:pointer;border-color:${
+      ev.status === "ACTIVE" ? "var(--acc)" : ev.status === "CLOSED" ? "var(--bull)" : "var(--line2)"}">
+      <div><b>${esc(ev.setup_id)}</b></div>
+      <div class="a-t">${esc(ev.symbol)} · ${esc(ev.timeframe)} · ${esc(ev.direction)}
+        · detected ${esc((ev.first_seen_at || "").slice(11, 19))}Z
+        · <span class="chip ${ev.status === "ACTIVE" ? "EXECUTION_READY" : ev.status === "CLOSED" ? "COMPLETED" : "INVALIDATED"}">${esc(ev.status)}</span>
+        ${ev.close_reason ? " · " + esc(ev.close_reason) : ""}</div>
+    </div>`).join("");
+  box.querySelectorAll("[data-causal]").forEach(el =>
+    el.onclick = () => openCausalDetail(el.dataset.causal));
+}
+async function openCausalDetail(id) {
+  const box = $("#causal-detail");
+  try {
+    const { event } = await api(`/api/setup-history/${encodeURIComponent(id)}`);
+    const t = event.timeline || [];
+    box.classList.remove("hidden");
+    box.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <b style="font-size:11.5px">${esc(event.setup_id)}</b>
+        <button class="mini" id="causal-close">close</button></div>
+      <div class="kv"><span class="k">Symbol / TF</span><span class="v">${esc(event.symbol)} · ${esc(event.timeframe)}</span></div>
+      <div class="kv"><span class="k">Direction</span><span class="v ${event.direction === "BULLISH" ? "bull" : "bear"}">${esc(event.direction)}</span></div>
+      <div class="kv"><span class="k">Entry</span><span class="v">${fmt(event.entry)}</span></div>
+      <div class="kv"><span class="k">Stop</span><span class="v" style="color:var(--bear)">${fmt(event.stop_loss)}</span></div>
+      <div class="kv"><span class="k">Target</span><span class="v" style="color:var(--bull)">${fmt(event.take_profit)}</span></div>
+      <div class="kv"><span class="k">R:R</span><span class="v">${event.rr ?? "—"}</span></div>
+      <div class="kv"><span class="k">Risk</span><span class="v">${fmt(event.risk_percent, 2)}%</span></div>
+      <div class="kv"><span class="k">As-of (market)</span><span class="v">${esc(event.as_of || "—")}</span></div>
+      <div class="kv"><span class="k">First seen</span><span class="v">${esc(event.first_seen_at || "")}</span></div>
+      <div class="kv"><span class="k">Last seen</span><span class="v">${esc(event.last_seen_at || "")} · ${event.observations} obs</span></div>
+      <div class="kv"><span class="k">Status</span><span class="v">${esc(event.status)}${event.close_reason ? " · " + esc(event.close_reason) : ""}</span></div>
+      <div class="kv"><span class="k">Reviewed</span><span class="v">${event.review_count ? `${event.review_count}× since ${esc((event.reviewed_at || "").slice(0, 19))}` : "not yet"}</span></div>
+      <div class="kv"><span class="k">Paper execution</span><span class="v">${esc(event.paper_execution_outcome || "NONE")}</span></div>
+      <div style="color:var(--faint);margin:4px 0 2px">evidence (backend snapshot)</div>
+      <pre class="ev-json">${esc(JSON.stringify(event.evidence, null, 1))}</pre>
+      <div style="color:var(--faint);margin:4px 0 2px">timeline (recorded transitions only)</div>
+      ${t.map(x => `<div class="a-t">${esc((x.at || "").slice(11, 19))}Z · ${esc(x.kind)} · ${esc(x.detail)}</div>`).join("")}
+      <button class="cta" id="causal-review">REVIEW SETUP</button>`;
+    $("#causal-close").onclick = () => box.classList.add("hidden");
+    $("#causal-review").onclick = () => reviewSetup(event.setup_id);
+  } catch (e) {
+    box.classList.remove("hidden");
+    box.innerHTML = `<div class="empty">detail unavailable: ${esc(e.message)}</div>`;
+  }
 }
 
 
@@ -156,9 +224,10 @@ function openStream() {
     if (p.symbol === S.symbol && p.price) { S.prices[p.symbol] = p.price; updatePriceTag(p.price); }
   });
   ["SETUP_CREATED", "SETUP_UPDATED", "SETUP_INVALIDATED"].forEach(k =>
-    es.addEventListener(k, () => { loadSetups(); loadReadiness(); if (k !== "SETUP_UPDATED") { loadAnalysis(true); } }));
+    es.addEventListener(k, () => { loadSetups(); loadReadiness(); loadCausalEvents();
+      if (k !== "SETUP_UPDATED") { loadAnalysis(true); } }));
   ["ORDER_PREPARED", "ORDER_PLACED", "ORDER_CANCELLED"].forEach(k =>
-    es.addEventListener(k, (ev) => { loadSetups(); loadHistory();
+    es.addEventListener(k, (ev) => { loadSetups(); loadHistory(); loadCausalEvents();
       toast(`${k}: ${JSON.parse(ev.data).payload.setup_id || ""}`); }));
   es.addEventListener("ALERT_CREATED", () => loadAlerts());
   es.onerror = () => { $("#conn-badge").textContent = "STREAM DOWN"; $("#conn-badge").className = "badge err"; };

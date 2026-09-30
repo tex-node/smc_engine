@@ -40,6 +40,7 @@ from ..structure import (
     detect_sweeps,
     find_swings,
 )
+from .history import SetupEventHistory, timeframe_from_id
 
 TIMEFRAMES = {
     "M1": 1, "M5": 5, "M15": 15, "M30": 30,
@@ -358,6 +359,7 @@ class EngineHub:
         self.source = source
         self.events = EventBus()
         self.web = WebStore(db_path)
+        self.event_history = SetupEventHistory(db_path)  # GUI-owned audit tables
         self.store = SetupStore(setup_store_path)
         self.registry = SetupRegistry()
         self.magic = magic
@@ -370,6 +372,61 @@ class EngineHub:
         self.risk_engines: dict[str, RiskEngine] = {}
         self._poller: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        self._history_failures = 0
+
+    # ---------- setup-event history (observational; never affects analysis) ----------
+    def _safe_history(self, fn, *args, **kwargs) -> None:
+        """§23: history persistence failure must NEVER break market analysis."""
+        try:
+            fn(*args, **kwargs)
+        except Exception:
+            import logging
+            self._history_failures += 1
+            logging.getLogger(__name__).exception("setup-history persistence failed "
+                                                  "(market analysis unaffected)")
+
+    # ---------- readiness (derived, read path + history observation) ----------
+    _READINESS_REQUIRED = ("setup_id", "symbol", "direction", "entry", "sl", "tp",
+                           "risk_percent", "state")
+
+    def readiness(self, symbol: Optional[str] = None) -> dict:
+        """Gate B readiness view derived from the engine lifecycle.
+
+        Presentation state only — deliberately NOT a lifecycle state.
+        A setup counts only when it is a genuine engine-causal id with
+        complete fields. Incomplete or foreign-id rows are rejected here
+        (and counted), never presented as executable. Discovery of a
+        genuine setup is mirrored into the setup-event history as a pure
+        side observation; it never triggers execution.
+        """
+        rows = self.lifecycle(symbol)
+        valid = [r for r in rows
+                 if str(r.get("setup_id", "")).startswith("SETUP-")
+                 and all(r.get(k) is not None and r.get(k) != "" for k in self._READINESS_REQUIRED)]
+        for r in valid:
+            self._safe_history(self.event_history.observe, {
+                "setup_id": r["setup_id"], "symbol": r["symbol"],
+                "timeframe": timeframe_from_id(r["setup_id"]),
+                "direction": r["direction"], "entry": r["entry"],
+                "stop_loss": r["sl"], "take_profit": r["tp"],
+                "risk_percent": r["risk_percent"], "rr": r.get("rr"),
+                "as_of": r["as_of"], "evidence": r["evidence"],
+            })
+        if valid:
+            return {
+                "status": "READY_FOR_MANUAL_VALIDATION",
+                "setup": valid[0],
+                "detected_ids": [r["setup_id"] for r in valid],
+                "rejected_incomplete": len(rows) - len(valid),
+                "mode": "GATE B WAITING FOR MANUAL VALIDATION — NO AUTO-EXECUTION",
+            }
+        return {
+            "status": "WAITING_FOR_CAUSAL_SETUP",
+            "setup": None,
+            "detected_ids": [],
+            "rejected_incomplete": len(rows) - len(valid),
+            "mode": "OBSERVATION — VALID MARKET STATE, NOT AN ERROR",
+        }
 
     # ---------- status ----------
     def status(self) -> dict:
@@ -479,9 +536,15 @@ class EngineHub:
         except Exception:
             return out
         analyzer = CausalMTFAnalyzer(symbol, MultiTimeframeConfig())
-        for cand in analyzer.analyze_at(d1, h4, m15)[-3:]:
+        all_cands = analyzer.analyze_at(d1, h4, m15)
+        market_as_of = str(m15["time"].iloc[-1])
+        observed_ids = {c.setup.id for c in all_cands}
+        for cand in all_cands[-3:]:
             self.register_setup(cand.setup)
             row = _setup_dict(cand.setup)
+            row["timeframe"] = cand.setup.order_block_id.split("-")[1] \
+                if cand.setup.order_block_id.count("-") >= 2 else "M15"
+            row["as_of"] = market_as_of
             row["evidence"] = {
                 "poi_id": cand.setup.poi_id,
                 "sweep": {"id": cand.sweep.id, "side": cand.sweep.side.value,
@@ -495,8 +558,24 @@ class EngineHub:
                 "inducement_id": cand.setup.inducement_id,
                 "irl_swing_id": cand.setup.irl_swing_id,
             }
+            self._safe_history(self.event_history.observe, self._history_payload(row))
             out.append(row)
+        # full-set sweep: ids the production pipeline no longer produces are
+        # EXPIRED in the audit trail (never deleted, never fake-inserted)
+        self._safe_history(self.event_history.expire_absent, symbol, observed_ids)
         return out
+
+    @staticmethod
+    def _history_payload(cand_row: dict) -> dict:
+        """Map a candidate row to the history payload shape."""
+        return {
+            "setup_id": cand_row["id"], "symbol": cand_row["symbol"],
+            "timeframe": cand_row.get("timeframe"), "direction": cand_row["direction"],
+            "entry": cand_row["entry"], "stop_loss": cand_row["stop_loss"],
+            "take_profit": cand_row["take_profit"], "risk_percent": cand_row["risk_percent"],
+            "rr": cand_row.get("reward_risk"), "as_of": cand_row.get("as_of"),
+            "evidence": cand_row.get("evidence"),
+        }
 
     # Orchestration-boundary completeness guard. The engine's own
     # build_trade_setup validates geometry; this protects the hub from
@@ -571,6 +650,18 @@ class EngineHub:
                     "risk_percent": lc.setup.risk_percent,
                     "ticket": self.paper_tickets.get(sid),
                     "reason": lc.reason,
+                    # causal provenance carried from the engine's own setup
+                    "as_of": str(lc.setup.created_time),
+                    "rr": (round(lc.setup.reward_distance / lc.setup.risk_distance, 3)
+                           if lc.setup.risk_distance else None),
+                    "evidence": {
+                        "poi_id": lc.setup.poi_id, "sweep_id": lc.setup.sweep_id,
+                        "csd_id": lc.setup.csd_id, "order_block_id": lc.setup.order_block_id,
+                        "inducement_id": lc.setup.inducement_id,
+                        "irl_swing_id": lc.setup.irl_swing_id,
+                        "protected_level": lc.setup.protected_level,
+                        "invalidation_level": lc.setup.invalidation_level,
+                    },
                 })
         return rows
 
@@ -583,7 +674,9 @@ class EngineHub:
         target = canon_state(to)
         if lc.state is target:
             return False
+        previous = lc.state.value
         lc.transition(target, reason)
+        self._safe_history(self.event_history.record_lifecycle, sid, previous, target.value, reason)
         event_map = {
             LCState.ORDER_PREPARED: "ORDER_PREPARED", LCState.ORDER_PLACED: "ORDER_PLACED",
             LCState.PROTECTED_LEVEL_BREACHED: "SETUP_INVALIDATED",
@@ -731,19 +824,27 @@ class EngineHub:
             reason = self._paper_gate(virtual)
             if reason:
                 raise PermissionError(f"paper gate: {reason}")
+            self._safe_history(self.event_history.mark_paper_execution, setup_id,
+                               "REQUESTED (pending limit)")
             check = self.source.order_check(self._real_request(virtual))
             retcode = getattr(check, "retcode", None)
             if retcode not in (0, 10004):
+                self._safe_history(self.event_history.mark_paper_execution, setup_id,
+                                   f"ORDER_CHECK_FAILED retcode={retcode}", requested=False)
                 raise ValueError(f"order_check retcode={retcode}")
             self._transition(setup_id, LCState.ORDER_PREFLIGHTED, "order_check ok")
             self._transition(setup_id, LCState.ORDER_SUBMITTING, "paper submit")
             sent = self.source.order_send(self._real_request(virtual))
             code = getattr(sent, "retcode", None)
             if code != 10009:
+                self._safe_history(self.event_history.mark_paper_execution, setup_id,
+                                   f"BROKER_REJECTED retcode={code}", requested=False)
                 raise RuntimeError(f"broker rejected placement retcode={code} {getattr(sent,'comment','')}")
             ticket = sent.order
             self.paper_tickets[setup_id] = ticket
             self._transition(setup_id, LCState.ORDER_PLACED, f"ticket {ticket}")
+            self._safe_history(self.event_history.mark_paper_execution, setup_id,
+                               f"ORDER_PLACED ticket={ticket}", requested=False)
             try:
                 self.store.upsert_setup(lc.setup, LCState.ORDER_PLACED,
                                         pd.Timestamp.now(tz="UTC"), ticket=ticket)
