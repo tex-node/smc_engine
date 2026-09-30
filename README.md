@@ -68,6 +68,35 @@ pip install -r requirements.txt
 python varis_smc_bot.py
 ```
 
+## Starting the Workstation (GUI)
+
+Double-click:
+
+```text
+C:\smc_engine\start_workstation.bat
+```
+
+The launcher starts the local workstation server (`python -m uvicorn
+smc_engine.web.api:create_app --factory`, default `http://127.0.0.1:8765`)
+and opens the browser automatically once the HTTP server is actually
+responding. It contains no credentials, never installs anything, and never
+executes trades. If the workstation is already running, it just opens the
+browser (no second server).
+
+The server console window must remain open while using the application.
+To stop: close that console, or run `stop_workstation.bat` (it only kills
+the console titled "SMC Engine Workstation Server").
+
+The launcher itself carries no credentials. If `MT5_LOGIN`, `MT5_PASSWORD`
+and `MT5_SERVER` are already present in your Windows environment, the app
+attaches to that demo terminal explicitly; otherwise it attaches to whatever
+terminal is running. The account gates are enforced by the application either
+way: a non-demo account disables paper execution automatically, and live
+execution is compiled off.
+
+For desktop access: right-click `start_workstation.bat` →
+*Send to → Desktop (create shortcut)*.
+
 ## Configuration
 
 Defaults are set at the top of `main()` in `varis_smc_bot.py`:
