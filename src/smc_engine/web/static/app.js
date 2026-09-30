@@ -28,14 +28,20 @@ function toast(msg, cls = "") {
 
 /* ---------------- boot ---------------- */
 async function boot() {
-  S.status = await api("/api/status").catch(() => ({ mt5: "DISCONNECTED" }));
-  renderStatus();
+  await loadStatus();
   try { S.symbols = (await api("/api/symbols")).symbols; } catch (e) { S.symbols = []; }
   S.symbol = S.symbols.includes("EURAUD") ? "EURAUD" : (S.symbols[0] || "EURAUD");
   buildTfButtons(); buildSymbolList(); wire();
   openStream();
   await refresh();
 }
+
+function refreshAll() {
+  loadStatus(); refresh();
+}
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refreshAll();   // stale tab recovers immediately
+});
 
 function wire() {
   $$("#tf-buttons button").forEach(b => b.onclick = () => { S.tf = b.dataset.tf; buildTfButtons(); refresh(); });
@@ -55,38 +61,69 @@ function wire() {
 /* ---------------- data loads ---------------- */
 async function refresh() { await Promise.all([loadAnalysis(), loadSetups(), loadAlerts(), loadHypotheses(), loadHistory(), loadReadiness(), loadCausalEvents()]); }
 
+let analysisSeq = 0;
 async function loadAnalysis(quiet) {
+  const my = ++analysisSeq;
+  const sym = S.symbol, tf = S.tf;
   try {
-    S.analysis = await api(`/api/analysis/${S.symbol}/${S.tf}?count=250`);
-    S.prices[S.symbol] = S.analysis.last_closed_close;
+    const a = await api(`/api/analysis/${sym}/${tf}?count=250`);
+    if (my !== analysisSeq) return;                 // stale response: newer one in flight/done
+    S.analysis = a;
+    S.prices[sym] = a.last_closed_close;
     drawChart(); renderQuote(); renderSetup(); renderRisk(); renderLifecycle();
   } catch (e) {
+    if (my !== analysisSeq) return;
     S.analysis = null;
     renderQuote(null, e.message);
     renderSetup(); renderLifecycle(); drawChart();
   }
 }
 
+async function loadStatus() {
+  try {
+    S.status = await api("/api/status");
+  } catch (e) {
+    // never keep showing an old server/account identity as if it were live
+    S.status = { engine: "UNKNOWN", mt5: "DISCONNECTED", account: null,
+                 account_mode: "UNKNOWN", market_data: "DOWN", risk_engine: "STANDBY",
+                 execution: "DISABLED", live_execution_enabled: false,
+                 paper_enabled: false, source: "none" };
+  }
+  renderStatus(); renderExec();
+}
+
+function identityChip(id) {
+  if (!id) return "";
+  const cls = id.account_class === "DEMO" ? "COMPLETED"
+            : id.account_class === "LIVE" ? "INVALIDATED" : "WATCHING";
+  return `<span class="q">SERVER <b>${esc(id.login || "—")} @ ${esc(id.server || "none")}</b> ` +
+         `<span class="chip ${cls}">${esc(id.account_class || "?")}</span></span>`;
+}
+
 function renderQuote(a, err) {
   const el = $("#quote-strip");
   if (!el) return;
-  if (!a) {
-    el.innerHTML = `<span class="q down">MARKET DATA UNAVAILABLE${err ? " — " + esc(err) : ""}</span>`;
+  if (!a) {   // FETCH_ERROR: the HTTP request itself failed
+    el.innerHTML = `<span class="q down">MARKET DATA REQUEST FAILED${err ? " — " + esc(err) : ""}</span>`;
     return;
   }
   const q = a.quote || { market_data: "UNAVAILABLE" };
-  if (q.market_data !== "AVAILABLE") {
-    el.innerHTML = `<span class="q">SYMBOL ${esc(a.symbol)} · TF ${esc(a.timeframe)} · </span>` +
-      `<span class="q down">BID/ASK: MARKET DATA UNAVAILABLE</span>`;
-    return;
+  const head = `<span class="q">${esc(a.symbol)} · ${esc(a.timeframe)}</span>` + identityChip(a.identity);
+  if (q.market_data === "AVAILABLE") {
+    el.innerHTML = head +
+      `<span class="q">BID <b>${fmt(q.bid)}</b></span>` +
+      `<span class="q">ASK <b>${fmt(q.ask)}</b></span>` +
+      `<span class="q">SPREAD <b>${fmt(q.spread)}</b></span>` +
+      `<span class="q">LAST UPDATE <b>${esc(q.tick_time || a.last_closed_candle_time)}</b></span>` +
+      `<span class="q">SOURCE <b>${esc(q.source)}</b></span>`;
+  } else if (q.market_data === "WAITING_FOR_LIVE_TICK") {
+    // calm, normal, short-lived state: history OK, live quote not yet streamed
+    el.innerHTML = head +
+      `<span class="q wait">WAITING FOR LIVE TICK</span>` +
+      `<span class="q">historical market data available — awaiting current quote</span>`;
+  } else {
+    el.innerHTML = head + `<span class="q down">MARKET DATA UNAVAILABLE</span>`;
   }
-  el.innerHTML =
-    `<span class="q">BID <b>${fmt(q.bid)}</b></span>` +
-    `<span class="q">ASK <b>${fmt(q.ask)}</b></span>` +
-    `<span class="q">SPREAD <b>${fmt(q.spread)}</b></span>` +
-    `<span class="q">LAST UPDATE <b>${esc(q.tick_time || a.last_closed_candle_time)}</b></span>` +
-    `<span class="q">SOURCE <b>${esc(q.source)}</b></span>` +
-    `<span class="q">STATE <b class="v bull">CONNECTED</b></span>`;
 }
 async function loadSetups() {
   try {

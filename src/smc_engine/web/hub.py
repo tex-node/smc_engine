@@ -51,6 +51,12 @@ LIVE_EXECUTION_ENABLED = False  # hard compile-time gate for this phase
 MAX_TOTAL_RISK_PERCENT = 3.0
 DEMO_MARKERS = ("demo", "trial")
 
+# Bounded zero-tick retry for freshly activated symbols (feed subscription
+# latency). Strictly read-only: symbol_info_tick only — no select, no order
+# primitives, finite attempts, small delay, never a fabricated price.
+QUOTE_ATTEMPTS = 5
+QUOTE_RETRY_DELAY = 0.4
+
 
 def norm_symbol(symbol: str) -> str:
     """Canonical symbol key used ONLY for hub-side comparison/filtering.
@@ -479,19 +485,10 @@ class EngineHub:
         pois = [update_poi_lifecycle(p, df) for p in build_d1_pois(df)]
         candidates = self.candidates_for(symbol)
         last = df.iloc[-1]
-        quote = {"market_data": "UNAVAILABLE", "bid": None, "ask": None, "spread": None,
-                 "tick_time": None, "source": self.source.name}
-        try:
-            t = self.source.tick(symbol)
-            if t is not None and t.get("bid") and t.get("ask"):
-                quote = {"market_data": "AVAILABLE", "bid": float(t["bid"]),
-                         "ask": float(t["ask"]),
-                         "spread": round(float(t["ask"]) - float(t["bid"]), 8),
-                         "tick_time": str(t.get("time")), "source": self.source.name}
-        except Exception:
-            pass
+        quote = self._quote_block(symbol)
         snapshot = {
             "symbol": symbol, "timeframe": tf,
+            "identity": self._identity(),
             "last_closed_time": str(last["time"]), "last_closed_close": float(last["close"]),
             "swings": [{"id": s.id, "index": s.index, "time": str(s.time), "type": s.type.value,
                         "price": s.price, "confirmation_index": s.confirmation_index} for s in swings],
@@ -521,6 +518,50 @@ class EngineHub:
         self.events.publish("MARKET_UPDATE", {"symbol": symbol, "tf": tf,
                                               "price": snapshot["last_closed_close"]})
         return snapshot
+
+    # ---------- market-data quote + identity (read-only) ----------
+    def _quote_block(self, symbol: str) -> dict:
+        """Bounded zero-tick retry immediately after symbol activation.
+
+        States: AVAILABLE / WAITING_FOR_LIVE_TICK (tick object exists but
+        bid/ask are still zero while history is fine) / UNAVAILABLE (no tick
+        object at all). Never substitutes candle closes or last prices.
+        """
+        saw_tick_without_price = False
+        for attempt in range(QUOTE_ATTEMPTS):
+            try:
+                t = self.source.tick(symbol)
+            except Exception:
+                t = None
+            if t is not None and t.get("bid") and t.get("ask"):
+                return {"market_data": "AVAILABLE", "bid": float(t["bid"]),
+                        "ask": float(t["ask"]),
+                        "spread": round(float(t["ask"]) - float(t["bid"]), 8),
+                        "tick_time": str(t.get("time")), "source": self.source.name}
+            if t is not None:
+                saw_tick_without_price = True
+            if attempt < QUOTE_ATTEMPTS - 1:
+                time.sleep(QUOTE_RETRY_DELAY)
+        state = "WAITING_FOR_LIVE_TICK" if saw_tick_without_price else "UNAVAILABLE"
+        return {"market_data": state, "bid": None, "ask": None, "spread": None,
+                "tick_time": None, "source": self.source.name}
+
+    def _identity(self) -> dict:
+        """Authoritative server/account identity from the live source.
+
+        Rendered by the GUI so a stale tab can never masquerade as a
+        different broker instance. Derived, never hard-coded.
+        """
+        acct = self.source.account() if self.source.connected else None
+        if acct is None:
+            account_class = "DISCONNECTED"
+        elif self.source.is_demo:
+            account_class = "DEMO"
+        else:
+            account_class = "LIVE"
+        return {"login": acct and acct.get("login"), "server": acct and acct.get("server"),
+                "account_class": account_class, "source": self.source.name,
+                "connected": bool(self.source.connected)}
 
     def candidates_for(self, symbol: str) -> list[dict]:
         """Causal engine output with its original evidence chain attached.
