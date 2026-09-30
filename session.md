@@ -36,6 +36,6 @@
 cd C:\smc_engine
 .venv\Scripts\python.exe -m uvicorn smc_engine.web.api:create_app --factory --host 127.0.0.1 --port 8765
 # http://127.0.0.1:8765  (env MT5_LOGIN/PASSWORD/SERVER for explicit demo attach)
-python -m pytest -q      # 143 tests
+python -m pytest -q      # 150 tests (incl. 7 readiness GUI-pipeline tests)
 ```
 Gate A evidence: `%TEMP%\opencode\gate_a_result.log`. Gate B traces/probes: `%TEMP%\opencode\gate_b_*.py|log` (not application code).
