@@ -1,4 +1,4 @@
-__pycache__/
+﻿__pycache__/
 *.py[cod]
 .venv/
 venv/
@@ -12,3 +12,10 @@ env/
 *.sqlite3-shm
 *.sqlite3-wal
 src/smc_engine.egg-info/
+
+# local runtime state / scratch (never commit)
+*_tmp.db
+*_tmp.db-shm
+*_tmp.db-wal
+live_scan*.db*
+SMC MT5Account.txt
