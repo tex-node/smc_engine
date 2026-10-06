@@ -46,6 +46,7 @@ class SetupLifecycle:
                 SetupState.PROTECTED_LEVEL_BREACHED,
                 SetupState.ENTRY_NO_LONGER_VALID,
                 SetupState.RISK_REJECTED,
+                SetupState.FILLED,
             },
             SetupState.ORDER_PREPARED: {
                 SetupState.ORDER_PREFLIGHTED,

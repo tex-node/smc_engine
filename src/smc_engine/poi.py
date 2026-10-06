@@ -1,4 +1,4 @@
-
+﻿
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -79,6 +79,10 @@ def build_d1_pois(
         return []
 
     work = detect_displacement(df, config).tail(lookback_bars).reset_index(drop=True)
+    # created_index must be the absolute position in df (the frame that
+    # update_poi_lifecycle receives), not the 0-based offset within the tail slice.
+    # offset converts work[i] -> df[offset + i].
+    offset = len(df) - len(work)
     pois: list[POI] = []
     for i, row in work.iterrows():
         if bool(row["displacement_bullish"]):
@@ -95,7 +99,7 @@ def build_d1_pois(
                 timeframe="D1",
                 low=float(row["low"]),
                 high=float(row["high"]),
-                created_index=i,
+                created_index=offset + i,
                 created_time=row["time"],
             )
         )

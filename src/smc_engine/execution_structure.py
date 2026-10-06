@@ -7,6 +7,11 @@ import pandas as pd
 
 from .models import Direction, Inducement, POI
 
+
+def _ts_key(t: object) -> str:
+    """Stable, position-independent key from a candle timestamp (ns-since-epoch)."""
+    return str(pd.Timestamp(t).value)
+
 @dataclass(frozen=True)
 class OrderBlock:
     id: str
@@ -59,7 +64,7 @@ def find_order_blocks(df: pd.DataFrame, displacement_indices: list[int], timefra
             continue
         row = df.iloc[source]
         blocks.append(OrderBlock(
-            id=f'OB-{timeframe}-{source}-{direction.value}', direction=direction, timeframe=timeframe,
+            id=f'OB-{timeframe}-{_ts_key(row["time"])}-{direction.value}', direction=direction, timeframe=timeframe,
             candle_index=source, candle_time=row['time'], low=float(row['low']), high=float(row['high']),
             mitigation_price=float(row['high'] if direction is Direction.BULLISH else row['low']),
             source_displacement_index=d,
@@ -90,10 +95,11 @@ def find_inducements(df: pd.DataFrame, order_blocks: list[OrderBlock], swings, m
         if not eligible:
             continue
         swing = min(eligible, key=lambda s: (pd.Timestamp(getattr(s, "confirmation_time", s.time)), s.index))
+        idm_t = getattr(swing, 'confirmation_time', None) or swing.time
         result.append(Inducement(
-            id=f'IDM-{ob.id}-{swing.index}', direction=ob.direction, candle_index=swing.index,
+            id=f'IDM-{ob.id}-{_ts_key(idm_t)}', direction=ob.direction, candle_index=swing.index,
             candle_time=swing.time, level=swing.price, source_swing_index=swing.index,
-            order_block_id=ob.id, confirmation_time=getattr(swing, 'confirmation_time', swing.time),
+            order_block_id=ob.id, confirmation_time=idm_t,
         ))
     return result
 

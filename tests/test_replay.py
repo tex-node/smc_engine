@@ -1,9 +1,14 @@
 
 import pandas as pd
+import pytest
 
 from src.smc_engine.models import Direction
-from src.smc_engine.replay import ReplayBroker, ReplayOrderState, summarize
+from src.smc_engine.replay import (
+    ReplayBroker, ReplayOrderState, ReplayRecord, run_replay,
+    distribution_report, summarize,
+)
 from src.smc_engine.setup import TradeSetup
+from src.smc_engine.strategy import MultiTimeframeConfig
 
 
 def setup(direction=Direction.BULLISH):
@@ -56,3 +61,74 @@ def test_summary():
     metrics = summarize(results)
     assert metrics.setups == 1
     assert metrics.targets == 1
+
+
+# ---------------------------------------------------------------------------
+# run_replay / ReplayRecord / distribution_report
+# ---------------------------------------------------------------------------
+
+def test_run_replay_returns_list():
+    """run_replay always returns a list (possibly empty)."""
+    from tests.test_integration_fixture import build_fixture
+    d1, h4, m15 = build_fixture()
+    records = run_replay("TEST", d1, h4, m15)
+    assert isinstance(records, list)
+
+
+def test_run_replay_records_have_correct_fields():
+    """Every ReplayRecord has the required provenance fields."""
+    from tests.test_integration_fixture import build_fixture
+    d1, h4, m15 = build_fixture()
+    records = run_replay("TEST", d1, h4, m15)
+    for r in records:
+        assert isinstance(r, ReplayRecord)
+        assert r.symbol == "TEST"
+        assert r.direction in ("BEARISH", "BULLISH")
+        assert r.risk_reward >= 0
+        assert r.stop_distance_pips > 0
+        assert r.target_distance_pips > 0
+        assert r.irl_strength >= 0
+        assert r.irl_dist_atrs >= 0
+        assert r.m15_atr > 0
+
+
+def test_run_replay_uses_min_rr_zero_regardless_of_config():
+    """run_replay captures setups even when config has min_rr=99 (gate must be ignored)."""
+    from tests.test_integration_fixture import build_fixture
+    d1, h4, m15 = build_fixture()
+    records_gate_off = run_replay("TEST", d1, h4, m15, MultiTimeframeConfig(min_rr=0.0))
+    records_gate_on  = run_replay("TEST", d1, h4, m15, MultiTimeframeConfig(min_rr=99.0))
+    assert len(records_gate_off) == len(records_gate_on), (
+        "run_replay must ignore min_rr — gate-free and gate-on results must match"
+    )
+
+
+def test_distribution_report_returns_string():
+    """distribution_report always returns a non-empty string."""
+    from tests.test_integration_fixture import build_fixture
+    d1, h4, m15 = build_fixture()
+    records = run_replay("TEST", d1, h4, m15)
+    report = distribution_report(records)
+    assert isinstance(report, str) and len(report) > 0
+
+
+def test_distribution_report_covers_all_buckets():
+    """distribution_report output contains all five R:R bucket labels."""
+    from tests.test_integration_fixture import build_fixture
+    d1, h4, m15 = build_fixture()
+    report = distribution_report(run_replay("TEST", d1, h4, m15))
+    for label in ("<0.5", "0.5-1.0", "1.0-1.5", "1.5-2.0", ">=2.0"):
+        assert label in report, f"distribution_report missing bucket {label!r}"
+
+
+def test_replay_record_rr_consistent_with_geometry():
+    """ReplayRecord.risk_reward = target_distance / stop_distance (within rounding)."""
+    from tests.test_integration_fixture import build_fixture
+    d1, h4, m15 = build_fixture()
+    for r in run_replay("TEST", d1, h4, m15):
+        if r.stop_distance_pips > 0:
+            expected = r.target_distance_pips / r.stop_distance_pips
+            assert abs(r.risk_reward - expected) < 0.002, (
+                f"R:R {r.risk_reward} inconsistent with geometry "
+                f"({r.target_distance_pips}/{r.stop_distance_pips}={expected:.3f})"
+            )

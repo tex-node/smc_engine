@@ -29,9 +29,18 @@ def test_valid_order_lifecycle():
 
 
 def test_invalid_transition_is_rejected():
+    # EXECUTION_READY → FILLED is now valid (D-1 fix: direct fill without order flow).
+    # EXECUTION_READY → POSITION_MANAGED is still invalid (must go through FILLED first).
     x = SetupLifecycle(make_setup())
     with pytest.raises(ValueError):
-        x.transition(SetupState.FILLED)
+        x.transition(SetupState.POSITION_MANAGED)
+
+
+def test_execution_ready_to_filled_is_valid():
+    """D-1: EXECUTION_READY → FILLED must be a valid direct transition."""
+    x = SetupLifecycle(make_setup())
+    x.transition(SetupState.FILLED)
+    assert x.state is SetupState.FILLED
 
 
 def test_registry_deduplicates_and_tracks_active_symbol():

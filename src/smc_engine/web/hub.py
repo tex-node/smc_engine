@@ -12,6 +12,7 @@ engine primitives (structure/poi/fvg/execution_structure/setup/causal).
 from __future__ import annotations
 
 import json
+import os
 import queue
 import sqlite3
 import threading
@@ -23,14 +24,14 @@ from typing import Any, Optional
 
 import pandas as pd
 
-from ..causal import CausalMTFAnalyzer
+from ..causal import CausalMTFAnalyzer, CausalProvenance
 from ..execution_policy import ExecutionPolicy
 from ..fvg import detect_fvgs
 from ..lifecycle import SetupLifecycle, SetupRegistry, SetupState as LCState
 from ..models import SetupState as ReplayState
 from ..poi import build_d1_pois, detect_displacement, update_poi_lifecycle
 from ..risk import RiskEngine, allocate_portfolio_risk_budget, pending_price_is_valid
-from ..setup import TradeSetup
+from ..setup import TradeSetup, evaluate_setup_lifecycle as _eval_lifecycle
 from ..store import SetupStore
 from ..strategy import MultiTimeframeConfig
 from ..execution_structure import find_inducements, find_order_blocks
@@ -41,6 +42,7 @@ from ..structure import (
     find_swings,
 )
 from .history import SetupEventHistory, timeframe_from_id
+from .runtime import build_fingerprint, record_startup
 
 TIMEFRAMES = {
     "M1": 1, "M5": 5, "M15": 15, "M30": 30,
@@ -48,8 +50,14 @@ TIMEFRAMES = {
 }
 
 LIVE_EXECUTION_ENABLED = False  # hard compile-time gate for this phase
+AUTHORIZED_LOGIN = 477217728
+AUTHORIZED_SERVER = "Exness-MT5Trial9"
 MAX_TOTAL_RISK_PERCENT = 3.0
 DEMO_MARKERS = ("demo", "trial")
+
+# Display states that indicate a setup has left EXECUTION_READY and is now terminal.
+# Terminal setups remain idempotent in the registry; they are never resurrected.
+_TERMINAL_DISPLAY_STATES = frozenset({"INVALIDATED", "COMPLETED", "ORDER_PLACED"})
 
 # Bounded zero-tick retry for freshly activated symbols (feed subscription
 # latency). Strictly read-only: symbol_info_tick only — no select, no order
@@ -362,6 +370,7 @@ class WebStore:
 class EngineHub:
     def __init__(self, source: MarketSource, db_path: str = "smc_engine_gui.sqlite3",
                  setup_store_path: str = "smc_engine_state.sqlite3", magic: int = 202609):
+        record_startup()
         self.source = source
         self.events = EventBus()
         self.web = WebStore(db_path)
@@ -379,6 +388,46 @@ class EngineHub:
         self._poller: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._history_failures = 0
+
+    # ---------- account identity gate ----------
+    def _account_identity(self) -> dict:
+        """Return identity check result for the current source.
+
+        Gate applies only to MT5Source (name='mt5'). DictSource, FakeDemoSource,
+        and any non-MT5 source bypass it so tests and offline mode are unaffected.
+        When not connected, treats as authorized (connection not yet established).
+        """
+        if self.source.name != "mt5":
+            return {"authorized": True, "login": None, "server": None,
+                    "mode": None, "reason": "non-mt5-source"}
+        acct = self.source.account() if self.source.connected else None
+        if not acct:
+            return {"authorized": True, "login": None, "server": None,
+                    "mode": None, "reason": "not-connected"}
+        login = acct.get("login")
+        server = str(acct.get("server", ""))
+        mode = "DEMO" if self.source.is_demo else "LIVE"
+        if login != AUTHORIZED_LOGIN:
+            return {"authorized": False, "login": login, "server": server,
+                    "mode": mode, "reason": f"login {login} != {AUTHORIZED_LOGIN}"}
+        if AUTHORIZED_SERVER not in server:
+            return {"authorized": False, "login": login, "server": server,
+                    "mode": mode, "reason": f"server '{server}' != '{AUTHORIZED_SERVER}'"}
+        if mode != "DEMO":
+            return {"authorized": False, "login": login, "server": server,
+                    "mode": mode, "reason": f"account mode is {mode}, must be DEMO"}
+        return {"authorized": True, "login": login, "server": server,
+                "mode": mode, "reason": "authorized"}
+
+    def _require_authorized(self) -> None:
+        """Raise PermissionError if connected to an unauthorized MT5 account."""
+        ident = self._account_identity()
+        if not ident["authorized"]:
+            raise PermissionError(
+                f"UNAUTHORIZED_ACCOUNT: {ident['login']}@{ident['server']} ({ident['mode']}). "
+                f"Authorized: {AUTHORIZED_LOGIN}@{AUTHORIZED_SERVER} DEMO. "
+                f"Reason: {ident['reason']}"
+            )
 
     # ---------- setup-event history (observational; never affects analysis) ----------
     def _safe_history(self, fn, *args, **kwargs) -> None:
@@ -405,10 +454,24 @@ class EngineHub:
         genuine setup is mirrored into the setup-event history as a pure
         side observation; it never triggers execution.
         """
+        ident = self._account_identity()
+        if not ident["authorized"]:
+            return {
+                "status": "UNAUTHORIZED_ACCOUNT",
+                "setup": None,
+                "detected_ids": [],
+                "rejected_incomplete": 0,
+                "terminal_historical_count": 0,
+                "mode": f"UNAUTHORIZED: {ident['reason']}",
+            }
         rows = self.lifecycle(symbol)
-        valid = [r for r in rows
-                 if str(r.get("setup_id", "")).startswith("SETUP-")
-                 and all(r.get(k) is not None and r.get(k) != "" for k in self._READINESS_REQUIRED)]
+        complete = [r for r in rows
+                    if str(r.get("setup_id", "")).startswith("SETUP-")
+                    and all(r.get(k) is not None and r.get(k) != "" for k in self._READINESS_REQUIRED)]
+        valid = [r for r in complete if r.get("display") == "EXECUTION_READY"]
+        # Semantic breakdown: incomplete (missing fields) vs terminal (complete but consumed)
+        rejected_incomplete = len(rows) - len(complete)
+        terminal_historical_count = len(complete) - len(valid)
         for r in valid:
             self._safe_history(self.event_history.observe, {
                 "setup_id": r["setup_id"], "symbol": r["symbol"],
@@ -423,14 +486,16 @@ class EngineHub:
                 "status": "READY_FOR_MANUAL_VALIDATION",
                 "setup": valid[0],
                 "detected_ids": [r["setup_id"] for r in valid],
-                "rejected_incomplete": len(rows) - len(valid),
+                "rejected_incomplete": rejected_incomplete,
+                "terminal_historical_count": terminal_historical_count,
                 "mode": "GATE B WAITING FOR MANUAL VALIDATION — NO AUTO-EXECUTION",
             }
         return {
             "status": "WAITING_FOR_CAUSAL_SETUP",
             "setup": None,
             "detected_ids": [],
-            "rejected_incomplete": len(rows) - len(valid),
+            "rejected_incomplete": rejected_incomplete,
+            "terminal_historical_count": terminal_historical_count,
             "mode": "OBSERVATION — VALID MARKET STATE, NOT AN ERROR",
         }
 
@@ -438,21 +503,92 @@ class EngineHub:
     def status(self) -> dict:
         acct = self.source.account() if self.source.connected else None
         mode = "DEMO" if acct and self.source.is_demo else ("LIVE" if acct else "DISCONNECTED")
+        ident = self._account_identity()
+        authorized = ident["authorized"]
+        actual_login = ident.get("login")
+        actual_server = ident.get("server")
+        actual_mode = ident.get("mode")
         return {
-            "engine": "CONNECTED",
+            "engine": "CONNECTED" if authorized else "UNAUTHORIZED_ACCOUNT",
             "mt5": "CONNECTED" if self.source.connected else "DISCONNECTED",
             "source": self.source.name,
             "account": acct,
             "account_mode": mode,
             "market_data": "LIVE" if self.source.connected else "DOWN",
-            "risk_engine": "READY" if acct else "STANDBY",
-            "execution": "READY" if (acct and self.source.is_demo) else "DISABLED",
+            "risk_engine": ("READY" if authorized else "UNAUTHORIZED") if acct else "STANDBY",
+            "execution": "READY" if (acct and self.source.is_demo and authorized) else "DISABLED",
             "live_execution_enabled": LIVE_EXECUTION_ENABLED,
-            "paper_enabled": self.source.is_demo,
+            "paper_enabled": self.source.is_demo and authorized,
+            "account_identity": "AUTHORIZED" if authorized else "UNAUTHORIZED",
+            "engine_operational": authorized,
+            "authorized_account": f"{AUTHORIZED_LOGIN}@{AUTHORIZED_SERVER} DEMO",
+            "actual_account": (
+                f"{actual_login}@{actual_server} {actual_mode}"
+                if actual_login is not None else "not-connected"
+            ),
         }
 
     def symbols(self) -> list[str]:
         return self.source.symbols()
+
+    # ---------- runtime fingerprint (read-only) ----------
+    def runtime_info(self) -> dict:
+        """Source/process identity with no broker or execution calls."""
+        st = self.status()
+        acct = st.get("account") or {}
+        ident = self._account_identity()
+        fp = build_fingerprint(
+            pid=os.getpid(),
+            account_mode=st.get("account_mode", "DEMO"),
+            account_login=acct.get("login"),
+        )
+        fp["authorized_account"] = f"{AUTHORIZED_LOGIN}@{AUTHORIZED_SERVER} DEMO"
+        actual_login = ident.get("login")
+        actual_server = ident.get("server")
+        actual_mode = ident.get("mode")
+        fp["actual_account"] = (
+            f"{actual_login}@{actual_server} {actual_mode}"
+            if actual_login is not None else "not-connected"
+        )
+        fp["account_identity"] = "AUTHORIZED" if ident["authorized"] else "UNAUTHORIZED"
+        fp["engine_operational"] = ident["authorized"]
+        return fp
+
+    # ---------- market-data diagnostic (read-only) ----------
+    def market_diagnostic(self, symbol: str, tf: str, count: int = 250) -> dict:
+        """Structured market-data availability report. Never executes."""
+        code = TIMEFRAMES.get(tf)
+        if code is None:
+            return {"error": f"unknown timeframe {tf}", "symbol": symbol, "tf": tf,
+                    "resolved_broker_symbol": None, "mt5_connected": self.source.connected,
+                    "returned_bar_count": 0, "latest_candle_time": None}
+        mt5_connected = self.source.connected
+        try:
+            spec = self.source.spec(symbol) or {}
+            resolved = spec.get("symbol", symbol)
+        except Exception as exc:
+            resolved = f"error:{exc}"
+            spec = {}
+        bar_count = 0
+        latest_candle_time = None
+        error: Optional[str] = None
+        try:
+            df = self.bars(symbol, tf, count)
+            bar_count = len(df)
+            if bar_count:
+                latest_candle_time = str(df.iloc[-1]["time"])
+        except Exception as exc:
+            error = str(exc)
+        return {
+            "symbol": symbol,
+            "requested_tf": tf,
+            "requested_bar_count": count,
+            "resolved_broker_symbol": resolved,
+            "mt5_connected": mt5_connected,
+            "returned_bar_count": bar_count,
+            "latest_candle_time": latest_candle_time,
+            "error": error,
+        }
 
     # ---------- bars with cache ----------
     def bars(self, symbol: str, tf: str, count: int = 300) -> pd.DataFrame:
@@ -470,6 +606,7 @@ class EngineHub:
 
     # ---------- analysis (engine primitives only) ----------
     def analysis(self, symbol: str, tf: str, count: int = 250) -> dict:
+        self._require_authorized()
         self.watch(symbol)
         df = self.bars(symbol, tf, count)
         swings = find_swings(df)
@@ -510,6 +647,18 @@ class EngineHub:
                       "time": str(p.created_time), "state": p.state.value}
                      for p in pois if p.state.value in ("ACTIVE", "TOUCHED")],
             "candidates": candidates,
+            "candidate_summary": {
+                "structurally_qualified_count": len(candidates),
+                "new_admissible_count": sum(
+                    1 for c in candidates if c.get("admission") == "NEW_ADMISSIBLE"
+                ),
+                "terminal_existing_count": sum(
+                    1 for c in candidates if c.get("admission") == "TERMINAL_HISTORICAL"
+                ),
+                "active_registered_count": sum(
+                    1 for c in candidates if c.get("admission") == "ACTIVE_REGISTERED"
+                ),
+            },
             "quote": quote,
             "last_closed_candle_time": str(last["time"]),
             "candles": [[str(r.time), float(r.open), float(r.high), float(r.low), float(r.close)]
@@ -563,6 +712,38 @@ class EngineHub:
                 "account_class": account_class, "source": self.source.name,
                 "connected": bool(self.source.connected)}
 
+    def _registry_admission_summary(self, symbol: str) -> dict:
+        """Read-only registry snapshot for a symbol.
+
+        Returns counts that distinguish structurally qualified setups from
+        newly admissible ones, without running the causal engine again.
+        Never registers, never modifies state.
+        """
+        execution_ready = 0
+        terminal = 0
+        active_non_ready = 0
+        want = norm_symbol(symbol)
+        with self._lock:
+            for sid in self.registered_ids:
+                lc = self.registry.get(sid)
+                if lc is None:
+                    continue
+                if norm_symbol(lc.setup.symbol) != want:
+                    continue
+                display = self.LADDER.get(canon_state(lc.state).name, "")
+                if display == "EXECUTION_READY":
+                    execution_ready += 1
+                elif display in _TERMINAL_DISPLAY_STATES:
+                    terminal += 1
+                else:
+                    active_non_ready += 1
+        return {
+            "execution_ready_count": execution_ready,
+            "terminal_existing_count": terminal,
+            "active_non_ready_count": active_non_ready,
+            "total_registered_count": execution_ready + terminal + active_non_ready,
+        }
+
     def candidates_for(self, symbol: str) -> list[dict]:
         """Causal engine output with its original evidence chain attached.
 
@@ -580,12 +761,31 @@ class EngineHub:
         all_cands = analyzer.analyze_at(d1, h4, m15)
         market_as_of = str(m15["time"].iloc[-1])
         observed_ids = {c.setup.id for c in all_cands}
+
+        # Classify each candidate BEFORE registration so we can report the
+        # admission distinction: new (not yet in registry) vs terminal
+        # (already in registry but in a consumed/invalidated state).
+        new_admissible = 0
+        terminal_existing = 0
         for cand in all_cands[-3:]:
+            pre_reg_lc = self.registry.get(cand.setup.id)
+            if pre_reg_lc is None:
+                admission = "NEW_ADMISSIBLE"
+                new_admissible += 1
+            else:
+                display = self.LADDER.get(canon_state(pre_reg_lc.state).name, "")
+                if display in _TERMINAL_DISPLAY_STATES:
+                    admission = "TERMINAL_HISTORICAL"
+                    terminal_existing += 1
+                else:
+                    admission = "ACTIVE_REGISTERED"
+
             self.register_setup(cand.setup)
             row = _setup_dict(cand.setup)
             row["timeframe"] = cand.setup.order_block_id.split("-")[1] \
                 if cand.setup.order_block_id.count("-") >= 2 else "M15"
             row["as_of"] = market_as_of
+            row["admission"] = admission
             row["evidence"] = {
                 "poi_id": cand.setup.poi_id,
                 "sweep": {"id": cand.sweep.id, "side": cand.sweep.side.value,
@@ -598,13 +798,102 @@ class EngineHub:
                 "order_block_id": cand.setup.order_block_id,
                 "inducement_id": cand.setup.inducement_id,
                 "irl_swing_id": cand.setup.irl_swing_id,
+                "irl_target_type": cand.setup.irl_target_type,
+                "irl_qualification_reason": cand.setup.irl_qualification_reason,
             }
             self._safe_history(self.event_history.observe, self._history_payload(row))
             out.append(row)
         # full-set sweep: ids the production pipeline no longer produces are
         # EXPIRED in the audit trail (never deleted, never fake-inserted)
         self._safe_history(self.event_history.expire_absent, symbol, observed_ids)
+        # Evaluate every EXECUTION_READY setup for this symbol against the
+        # current closed M15 bar sequence. This is the single production call
+        # site for evaluate_setup_lifecycle; it runs on every causal scan
+        # (poller + on-demand analysis) and is idempotent across repeated ticks.
+        with self._lock:
+            pending_eval = [
+                sid for sid in self.registered_ids
+                if self.registry.get(sid) is not None
+                and norm_symbol(self.registry.get(sid).setup.symbol) == norm_symbol(symbol)
+                and self.registry.get(sid).state is LCState.EXECUTION_READY
+            ]
+        for sid in pending_eval:
+            self._apply_lifecycle_evaluation(sid, m15)
         return out
+
+    def causal_scan_provenance(self, symbol: str) -> dict:
+        """Trace the causal chain for one symbol. Returns rejection stage + counts."""
+        self._require_authorized()
+        try:
+            d1 = self.bars(symbol, "D1", 150)
+            h4 = self.bars(symbol, "H4", 400)
+            m15 = self.bars(symbol, "M15", 500)
+        except Exception as exc:
+            return {
+                "symbol": symbol, "as_of": None,
+                "d1_poi_count": 0, "matching_sweep_count": 0, "csd_count": 0,
+                "post_csd_ob_count": 0, "unmitigated_ob_count": 0, "idm_count": 0,
+                "structurally_qualified_count": 0,
+                "rr_filtered_count": 0, "rr_gate": "",
+                "new_admissible_count": 0,
+                "execution_ready_count": 0,
+                "engine_execution_ready_count": 0,
+                "qualified_candidate_count": 0,
+                "rejection_stage": "D1_POI", "rejection_reason": f"data unavailable: {exc}",
+            }
+        prov = CausalMTFAnalyzer(symbol, MultiTimeframeConfig()).trace_chain(d1, h4, m15)
+        reg = self._registry_admission_summary(symbol)
+        # new_admissible = structurally qualified setups that are also execution-ready
+        # and not already in a terminal lifecycle state.
+        new_admissible = max(0, prov.execution_ready_count - reg["terminal_existing_count"])
+        return {
+            "symbol": prov.symbol, "as_of": str(prov.as_of),
+            "d1_poi_count": prov.d1_poi_count,
+            "matching_sweep_count": prov.matching_sweep_count,
+            "csd_count": prov.csd_count,
+            "post_csd_ob_count": prov.post_csd_ob_count,
+            "unmitigated_ob_count": prov.unmitigated_ob_count,
+            "idm_count": prov.idm_count,
+            "structurally_qualified_count": prov.structurally_qualified_count,
+            "rr_filtered_count": prov.rr_filtered_count,
+            "rr_gate": prov.rr_gate,
+            "new_admissible_count": new_admissible,
+            # execution_ready_count: registry-based (how many setups are in EXECUTION_READY
+            # lifecycle state); kept for backward compatibility with existing tests/consumers.
+            # engine_execution_ready_count: engine-based (how many pass all gates in this scan).
+            "execution_ready_count": reg["execution_ready_count"],
+            "engine_execution_ready_count": prov.execution_ready_count,
+            "qualified_candidate_count": prov.qualified_candidate_count,
+            # Registry admission breakdown (derived from current lifecycle state):
+            "terminal_existing_count": reg["terminal_existing_count"],
+            "total_registered_count": reg["total_registered_count"],
+            "rejection_stage": prov.rejection_stage,
+            "rejection_reason": prov.rejection_reason,
+        }
+
+    def causal_scan_universe(self) -> dict:
+        """Trace causal chain for all broker symbols. Read-only observability scan."""
+        self._require_authorized()
+        syms = self.symbols()
+        results = []
+        for sym in syms:
+            try:
+                results.append(self.causal_scan_provenance(sym))
+            except PermissionError:
+                raise
+            except Exception as exc:
+                results.append({
+                    "symbol": sym, "as_of": None,
+                    "d1_poi_count": 0, "matching_sweep_count": 0, "csd_count": 0,
+                    "post_csd_ob_count": 0, "unmitigated_ob_count": 0, "idm_count": 0,
+                    "qualified_candidate_count": 0,
+                    "rejection_stage": "D1_POI", "rejection_reason": f"scan error: {exc}",
+                })
+        return {
+            "symbols_scanned": len(results),
+            "candidates_found": sum(r["qualified_candidate_count"] for r in results),
+            "scan": results,
+        }
 
     @staticmethod
     def _history_payload(cand_row: dict) -> dict:
@@ -625,6 +914,7 @@ class EngineHub:
                         "take_profit", "risk_percent", "protected_level")
 
     def register_setup(self, setup: TradeSetup) -> None:
+        self._require_authorized()
         with self._lock:
             if any(getattr(setup, f, None) is None
                    or (isinstance(getattr(setup, f, None), float) and
@@ -700,6 +990,8 @@ class EngineHub:
                         "csd_id": lc.setup.csd_id, "order_block_id": lc.setup.order_block_id,
                         "inducement_id": lc.setup.inducement_id,
                         "irl_swing_id": lc.setup.irl_swing_id,
+                        "irl_target_type": lc.setup.irl_target_type,
+                        "irl_qualification_reason": lc.setup.irl_qualification_reason,
                         "protected_level": lc.setup.protected_level,
                         "invalidation_level": lc.setup.invalidation_level,
                     },
@@ -720,12 +1012,14 @@ class EngineHub:
         self._safe_history(self.event_history.record_lifecycle, sid, previous, target.value, reason)
         event_map = {
             LCState.ORDER_PREPARED: "ORDER_PREPARED", LCState.ORDER_PLACED: "ORDER_PLACED",
+            LCState.FILLED: "SETUP_FILLED",
             LCState.PROTECTED_LEVEL_BREACHED: "SETUP_INVALIDATED",
             LCState.POI_INVALIDATED: "SETUP_INVALIDATED", LCState.OB_INVALIDATED: "SETUP_INVALIDATED",
             LCState.RISK_REJECTED: "SETUP_INVALIDATED", LCState.BROKER_REJECTED: "SETUP_INVALIDATED",
+            LCState.ENTRY_NO_LONGER_VALID: "SETUP_INVALIDATED",
         }
         if target.name in ("PROTECTED_LEVEL_BREACHED", "POI_INVALIDATED", "OB_INVALIDATED",
-                           "RISK_REJECTED", "BROKER_REJECTED"):
+                           "RISK_REJECTED", "BROKER_REJECTED", "ENTRY_NO_LONGER_VALID"):
             self.web.add_alert(lc.setup.symbol, "causal", "SETUP_INVALIDATED",
                                f"{sid} invalidated: {reason}", level="WARN")
         self.events.publish(event_map.get(target, "SETUP_UPDATED"),
@@ -830,6 +1124,7 @@ class EngineHub:
             return {"status": "DRY_RUN_REJECTED", "setup_id": setup_id, "reason": str(exc)}
 
     def paper_place(self, setup_id: str) -> dict:
+        self._require_authorized()
         with self._lock:
             if not self.source.is_demo:
                 raise PermissionError("PAPER EXECUTION REJECTED: not a demo account")
@@ -993,6 +1288,45 @@ class EngineHub:
                 logging.getLogger(__name__).warning("history row %s merge failed: %s", d.get("setup_id"), exc)
             out.append(d)
         return out
+
+    # ---------- lifecycle evaluation ----------
+    def _apply_lifecycle_evaluation(self, setup_id: str, m15: pd.DataFrame) -> None:
+        """Evaluate one EXECUTION_READY setup against closed M15 bars and apply
+        the appropriate lifecycle transition.
+
+        Uses the last closed bar (len(m15)-1) as current_index so that an
+        unfinished live bar never influences terminal-state decisions.
+
+        Idempotent: skips setups already in a terminal state. Concurrent
+        transitions that race ahead of this call are silently absorbed.
+        """
+        lc = self.registry.get(setup_id)
+        if lc is None or lc.state is not LCState.EXECUTION_READY:
+            return
+        current_index = len(m15) - 1
+        try:
+            result = _eval_lifecycle(lc.setup, m15, current_index=current_index)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception(
+                "lifecycle eval failed for %s", setup_id)
+            return
+        # Map models.SetupState → lifecycle.SetupState and apply exactly once.
+        if result.state is ReplayState.EXPIRED:
+            try:
+                self._transition(setup_id, LCState.ENTRY_NO_LONGER_VALID, result.reason)
+            except ValueError:
+                pass  # already transitioned by a concurrent path
+        elif result.state is ReplayState.INVALIDATED:
+            try:
+                self._transition(setup_id, LCState.PROTECTED_LEVEL_BREACHED, result.reason)
+            except ValueError:
+                pass
+        elif result.state is ReplayState.FILLED:
+            try:
+                self._transition(setup_id, LCState.FILLED, result.reason)
+            except ValueError:
+                pass
 
     # ---------- poller ----------
     def start_poller(self, interval: float = 15.0) -> None:

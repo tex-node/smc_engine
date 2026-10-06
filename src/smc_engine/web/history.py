@@ -31,7 +31,8 @@ from typing import Any, Optional
 
 import pandas as pd
 
-# engine's own id shape: SETUP-<SYMBOL>-<int>OB-...  (see build_trade_setup)
+# engine's own id shape: SETUP-<SYMBOL>-<csd_ns_epoch>-OB-<tf>-<ob_ns_epoch>-<dir>
+# All numeric components are nanoseconds-since-epoch (all-digit strings). (see build_trade_setup)
 CANONICAL_SETUP_ID = re.compile(r"^SETUP-[A-Z][A-Z0-9]*-\d+-OB-[A-Z0-9.\-]+$")
 
 # audit-side statuses. NOT trading lifecycle states (those stay in the engine).
@@ -216,11 +217,11 @@ class SetupEventHistory:
             self._conn.execute(
                 "INSERT INTO setup_event_timeline(setup_id,at,kind,detail) VALUES(?,?,?,?)",
                 (setup_id, now, "STATE", f"{from_state} -> {to_state}: {reason}"))
-            if to_state == "CLOSED":
+            if to_state in ("CLOSED", "FILLED"):
                 self._conn.execute(
                     """UPDATE setup_events SET status=?, close_reason=?, closed_at=?
                        WHERE setup_id=? AND status NOT IN(?,?)""",
-                    (STATUS_CLOSED, reason or "CLOSED", now, setup_id,
+                    (STATUS_CLOSED, reason or to_state, now, setup_id,
                      STATUS_CLOSED, STATUS_EXPIRED))
             elif to_state in _BREACH_STATES:
                 self._conn.execute(

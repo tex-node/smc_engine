@@ -25,9 +25,11 @@ class MultiTimeframeConfig:
     m15_swing_right: int = 2
     m15_displacement_atr: float = 1.5
     m15_atr_period: int = 14
-    m15_ob_search_back: int = 5
-    m15_idm_window: int = 8
+    m15_ob_search_back: int = 20
+    m15_idm_window: int = 16
+    m15_irl_ob_proximity: int = 10
     risk_percent: float = 1.0
+    min_rr: float = 0.0
 
 
 @dataclass(frozen=True)

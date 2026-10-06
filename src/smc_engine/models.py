@@ -53,6 +53,7 @@ class LiquidityPool:
     price: float
     source_swing_id: str
     source_time: object
+    source_candle_index: int = 0
 
 @dataclass(frozen=True)
 class LiquiditySweep:

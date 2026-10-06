@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
-from .hub import TIMEFRAMES, EngineHub, MT5Source
+from .hub import AUTHORIZED_LOGIN, AUTHORIZED_SERVER, DEMO_MARKERS, TIMEFRAMES, EngineHub, MT5Source
 from .hub import _jsonable  # view-model serialization helper
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -32,8 +32,20 @@ def build_hub() -> EngineHub:
     password = os.environ.get("MT5_PASSWORD")
     server = os.environ.get("MT5_SERVER")
     path = os.environ.get("MT5_TERMINAL_PATH")
+
+    if login is None or server is None or password is None:
+        raise SystemExit(
+            "STARTUP ERROR: MT5_LOGIN, MT5_PASSWORD, and MT5_SERVER must all be set "
+            "in the environment before starting the workstation. "
+            "The server will not start without explicit credentials."
+        )
+
     source = MT5Source(login=login, password=password, server=server, path=path)
     source.connect()
+
+    if source.name == "mt5":
+        _verify_authorized_account(source)
+
     db_dir = os.environ.get("SMC_GUI_DB_DIR", ".")
     hub = EngineHub(
         source,
@@ -42,6 +54,40 @@ def build_hub() -> EngineHub:
     )
     hub.start_poller()
     return hub
+
+
+def _verify_authorized_account(source: MT5Source) -> None:
+    """Fail startup if the connected MT5 account is not the authorized demo account.
+
+    Mirrors _account_identity() in hub.py but raises SystemExit so the server
+    process terminates before accepting any requests.
+    """
+    acct = source.account() if source.connected else None
+    if not acct:
+        raise SystemExit(
+            "STARTUP ERROR: MT5 connected but account() returned no data. "
+            "Cannot verify account identity. Server will not start."
+        )
+
+    login = acct.get("login")
+    server = str(acct.get("server", ""))
+    mode = "DEMO" if source.is_demo else "LIVE"
+
+    errors = []
+    if login != AUTHORIZED_LOGIN:
+        errors.append(f"login mismatch: connected={login}, required={AUTHORIZED_LOGIN}")
+    if AUTHORIZED_SERVER not in server:
+        errors.append(f"server mismatch: connected={server!r}, required={AUTHORIZED_SERVER!r}")
+    if mode != "DEMO":
+        errors.append(f"account_mode is {mode}, must be DEMO")
+
+    if errors:
+        raise SystemExit(
+            "STARTUP ERROR: Connected MT5 account is NOT the authorized account.\n"
+            + "\n".join(f"  - {e}" for e in errors)
+            + "\nThe server will not start. Set MT5_LOGIN=477217728 / "
+            "MT5_SERVER=Exness-MT5Trial9 and connect to the authorized DEMO terminal."
+        )
 
 
 def create_app(hub: Optional[EngineHub] = None) -> FastAPI:
@@ -62,6 +108,38 @@ def create_app(hub: Optional[EngineHub] = None) -> FastAPI:
         if not str(target).startswith(str(STATIC_DIR.resolve())) or not target.is_file():
             raise HTTPException(404)
         return FileResponse(target)
+
+    # ---------- runtime fingerprint (read-only) ----------
+    @app.get("/api/runtime")
+    def runtime():
+        """Source identity, git commit, file hashes, process metadata.
+        No broker calls. No credentials. Purely observational."""
+        return _jsonable(H().runtime_info())
+
+    @app.get("/api/causal-scan")
+    def causal_scan_universe():
+        """Read-only causal chain provenance scan across all broker symbols."""
+        try:
+            return _jsonable(H().causal_scan_universe())
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc))
+        except Exception as exc:
+            raise HTTPException(503, str(exc))
+
+    @app.get("/api/causal-scan/{symbol}")
+    def causal_scan_symbol(symbol: str):
+        """Causal chain provenance trace for a single symbol."""
+        try:
+            return _jsonable(H().causal_scan_provenance(symbol))
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc))
+        except Exception as exc:
+            raise HTTPException(503, str(exc))
+
+    @app.get("/api/market-diagnostic/{symbol}")
+    def market_diagnostic(symbol: str, tf: str = "M15", count: int = 250):
+        """Structured market-data availability diagnostic. Read-only."""
+        return _jsonable(H().market_diagnostic(symbol, tf, count))
 
     # ---------- status / account / symbols ----------
     @app.get("/api/status")
@@ -99,6 +177,8 @@ def create_app(hub: Optional[EngineHub] = None) -> FastAPI:
             raise HTTPException(400, f"unknown timeframe {tf}")
         try:
             return _jsonable(H().analysis(symbol, tf, count))
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc))
         except Exception as exc:
             raise HTTPException(503, str(exc))
 
@@ -181,7 +261,13 @@ def create_app(hub: Optional[EngineHub] = None) -> FastAPI:
     # ---------- alerts / history ----------
     @app.get("/api/alerts")
     def alerts(limit: int = 100):
-        return {"alerts": _jsonable(H().web.alerts(limit))}
+        from .runtime import _SERVER_STARTED_AT
+        import pandas as pd
+        startup_iso: Optional[str] = (
+            pd.Timestamp(_SERVER_STARTED_AT, unit="s", tz="UTC").isoformat()
+            if _SERVER_STARTED_AT else None
+        )
+        return {"alerts": _jsonable(H().web.alerts(limit)), "server_startup_time": startup_iso}
 
     @app.get("/api/history")
     def history():
@@ -206,6 +292,8 @@ def create_app(hub: Optional[EngineHub] = None) -> FastAPI:
             raise HTTPException(400, "symbol required")
         try:
             return _jsonable(H().analysis(symbol, tf))
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc))
         except Exception as exc:
             raise HTTPException(503, str(exc))
 

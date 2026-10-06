@@ -170,22 +170,51 @@ def test_risk_display_tracks_backend_result(tmp_path, stubbed):
 
 
 def test_lifecycle_state_is_canonical(tmp_path, stubbed):
+    # REAL_SETUP (BULLISH, entry=99.37, tp=106.51) gets FILLED in the fixture: the M15
+    # bars include a bar that both touches entry AND exceeds TP (high=110 at bar 61).
+    # Since D-1 is fixed, the hub correctly transitions the setup to FILLED. This test
+    # verifies:
+    #   (a) FILLED is the state the API exposes after analysis on this fixture.
+    #   (b) Lifecycle state canonicalization works for manually-registered setups.
     StubAnalyzer.candidates = [CausalCandidate(setup=REAL_SETUP, setup_time=BASE,
                                                sweep=REAL_SWEEP, csd=REAL_CSD)]
     client, hub = build_client(tmp_path, FakeDemoSource())
     client.get("/api/analysis/TEST/M15")
     row = client.get("/api/setups?symbol=TEST").json()["setups"][0]
-    assert row["state"] == "EXECUTION_READY" and row["display"] == "EXECUTION_READY"
+    # D-1 fix: fixture causes FILLED; state and display must be canonical.
+    assert row["state"] == "FILLED", f"expected FILLED after analysis on fixture, got {row['state']}"
+    assert row["display"] == "ORDER_PLACED"  # LADDER["FILLED"] == "ORDER_PLACED"
+
+    # Independently verify EXECUTION_READY → PROTECTED_LEVEL_BREACHED canonicalization
+    # by registering a fresh setup that won't be FILLED by the fixture bars.
     from src.smc_engine.lifecycle import SetupState
-    hub._transition("SET-REAL", SetupState.PROTECTED_LEVEL_BREACHED, "x")
-    row = client.get("/api/setups?symbol=TEST").json()["setups"][0]
-    assert row["state"] == "PROTECTED_LEVEL_BREACHED" and row["display"] == "INVALIDATED"
+    from src.smc_engine.setup import TradeSetup
+    fresh = TradeSetup(
+        id="SET-CANON-2", symbol="TEST", direction=Direction.BULLISH,
+        created_time=pd.Timestamp("2099-01-01", tz="UTC"),  # far future — no bars after this
+        poi_id="POI-C", sweep_id="SW-C", csd_id="CSD-C", protected_level=93.0,
+        order_block_id="OB-C", inducement_id="IDM-C", entry=99.0, stop_loss=93.0,
+        take_profit=120.0, irl_swing_id="IRL-C", invalidation_level=93.0, risk_percent=1.0,
+    )
+    hub.register_setup(fresh)
+    rows = client.get("/api/setups?symbol=TEST").json()["setups"]
+    fresh_row = next(r for r in rows if r["setup_id"] == "SET-CANON-2")
+    assert fresh_row["state"] == "EXECUTION_READY" and fresh_row["display"] == "EXECUTION_READY"
+    hub._transition("SET-CANON-2", SetupState.PROTECTED_LEVEL_BREACHED, "x")
+    rows = client.get("/api/setups?symbol=TEST").json()["setups"]
+    fresh_row = next(r for r in rows if r["setup_id"] == "SET-CANON-2")
+    assert fresh_row["state"] == "PROTECTED_LEVEL_BREACHED" and fresh_row["display"] == "INVALIDATED"
     hub.stop_poller()
 
 
 def test_paper_button_flow_never_bypasses_gate_and_live_stays_off(tmp_path, stubbed):
     pytest.importorskip("MetaTrader5")  # placement converts via broker constants
-    StubAnalyzer.candidates = [CausalCandidate(setup=REAL_SETUP, setup_time=BASE,
+    # Use a setup whose created_time is after all fixture M15 bars so it stays
+    # EXECUTION_READY after lifecycle evaluation (D-1 fix: FILLED setups cannot be
+    # paper-placed, which is correct; this test verifies the paper-gate path itself).
+    from dataclasses import replace
+    paper_setup = replace(REAL_SETUP, created_time=pd.Timestamp("2099-01-01", tz="UTC"))
+    StubAnalyzer.candidates = [CausalCandidate(setup=paper_setup, setup_time=BASE,
                                                sweep=REAL_SWEEP, csd=REAL_CSD)]
     src = FakeDemoSource()
     client, hub = build_client(tmp_path, src)

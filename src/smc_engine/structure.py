@@ -6,6 +6,16 @@ from .models import (
     StructureEvent, StructureEventType, SwingPoint, SwingType,
 )
 
+
+def _ts_key(t: object) -> str:
+    """Stable, position-independent key derived from a candle's timestamp.
+
+    Returns the integer nanoseconds-since-epoch as a decimal string.
+    All-digit output satisfies the CANONICAL_SETUP_ID regex without changes.
+    """
+    return str(pd.Timestamp(t).value)
+
+
 def find_swings(df: pd.DataFrame, left: int = 3, right: int = 3) -> list[SwingPoint]:
     """Find confirmed pivot swings using completed candles only."""
     if left < 1 or right < 1:
@@ -17,10 +27,11 @@ def find_swings(df: pd.DataFrame, left: int = 3, right: int = 3) -> list[SwingPo
     highs, lows = df["high"].to_numpy(), df["low"].to_numpy()
     for i in range(left, len(df) - right):
         h, l = highs[i], lows[i]
+        t = df.iloc[i]["time"]
         if h > max(highs[i-left:i]) and h >= max(highs[i+1:i+right+1]):
-            swings.append(SwingPoint(f"SH-{i}", i, df.iloc[i]["time"], SwingType.HIGH, float(h), left + right, i + right, df.iloc[i + right]["time"]))
+            swings.append(SwingPoint(f"SH-{_ts_key(t)}", i, t, SwingType.HIGH, float(h), left + right, i + right, df.iloc[i + right]["time"]))
         if l < min(lows[i-left:i]) and l <= min(lows[i+1:i+right+1]):
-            swings.append(SwingPoint(f"SL-{i}", i, df.iloc[i]["time"], SwingType.LOW, float(l), left + right, i + right, df.iloc[i + right]["time"]))
+            swings.append(SwingPoint(f"SL-{_ts_key(t)}", i, t, SwingType.LOW, float(l), left + right, i + right, df.iloc[i + right]["time"]))
     return swings
 
 def build_liquidity_pools(swings: list[SwingPoint]) -> list[LiquidityPool]:
@@ -31,6 +42,7 @@ def build_liquidity_pools(swings: list[SwingPoint]) -> list[LiquidityPool]:
             s.price,
             s.id,
             s.time,
+            s.index,
         )
         for s in swings
     ]
@@ -53,21 +65,27 @@ def detect_sweeps(
         if swings is not None:
             if source is None or source.confirmation_index >= len(df):
                 continue
-        source_idx = int(pool.source_swing_id.split("-")[-1])
-        confirmation_index = source.confirmation_index if source is not None else source_idx
+        # Use the stored candle index directly — never parse from the ID string,
+        # since IDs are timestamp-based and contain no positional information.
+        if source is not None:
+            source_idx = source.index
+            confirmation_index = source.confirmation_index
+        else:
+            source_idx = pool.source_candle_index
+            confirmation_index = source_idx
         start = max(source_idx + 1, confirmation_index if swings is not None else source_idx + 1)
         end = min(len(df), source_idx + 1 + lookback_bars)
         for i in range(start, end):
             row = df.iloc[i]
             if pool.side is LiquiditySide.SELL_SIDE and row["low"] < pool.price and row["close"] > pool.price:
                 sweeps.append(LiquiditySweep(
-                    f"SWEEP-{i}-{pool.id}", pool.side, pool.price, float(row["low"]),
+                    f"SWEEP-{_ts_key(row['time'])}-{pool.id}", pool.side, pool.price, float(row["low"]),
                     pool.id, i, row["time"], float(row["close"])
                 ))
                 break
             if pool.side is LiquiditySide.BUY_SIDE and row["high"] > pool.price and row["close"] < pool.price:
                 sweeps.append(LiquiditySweep(
-                    f"SWEEP-{i}-{pool.id}", pool.side, pool.price, float(row["high"]),
+                    f"SWEEP-{_ts_key(row['time'])}-{pool.id}", pool.side, pool.price, float(row["high"]),
                     pool.id, i, row["time"], float(row["close"])
                 ))
                 break
@@ -86,11 +104,11 @@ def detect_structure_breaks(df: pd.DataFrame, swings: list[SwingPoint], start_in
         if prior_highs:
             h = prior_highs[-1]
             if previous_close <= h.price < row["close"]:
-                events.append(StructureEvent(f"BOS-H-{i}", StructureEventType.BOS, Direction.BULLISH, h.price, i, row["time"], h.id))
+                events.append(StructureEvent(f"BOS-H-{_ts_key(row['time'])}", StructureEventType.BOS, Direction.BULLISH, h.price, i, row["time"], h.id))
         if prior_lows:
             l = prior_lows[-1]
             if previous_close >= l.price > row["close"]:
-                events.append(StructureEvent(f"BOS-L-{i}", StructureEventType.BOS, Direction.BEARISH, l.price, i, row["time"], l.id))
+                events.append(StructureEvent(f"BOS-L-{_ts_key(row['time'])}", StructureEventType.BOS, Direction.BEARISH, l.price, i, row["time"], l.id))
     return events
 
 def confirm_csd(

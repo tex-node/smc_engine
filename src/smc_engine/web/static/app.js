@@ -26,6 +26,38 @@ function toast(msg, cls = "") {
   document.body.appendChild(t); setTimeout(() => t.remove(), 4200);
 }
 
+/* ---------------- runtime fingerprint ---------------- */
+async function loadRuntime() {
+  try {
+    const r = await api("/api/runtime");
+    S.runtime = r;
+    const chip = $("#build-chip");
+    if (!chip) return;
+    const dirty = r.git_dirty ? "·dirty" : "";
+    chip.textContent = `BUILD ${esc(r.git_commit || "?")}${dirty}`;
+    chip.title = `git: ${r.git_commit}${r.git_dirty ? " (dirty)" : ""} · PID ${r.pid} · started ${(r.server_started_at || "").slice(0, 19)}Z`;
+    if (r.files_modified_after_startup && r.files_modified_after_startup.length) {
+      chip.style.color = "var(--warn, #f59e0b)";
+      chip.title += ` · STALE: ${r.files_modified_after_startup.join(", ")}`;
+    }
+    chip.onclick = () => {
+      const lines = [
+        `git: ${r.git_commit}${r.git_dirty ? " (DIRTY)" : ""}`,
+        `pid: ${r.pid}  python: ${(r.python_executable || "").split(/[\\/]/).pop()}`,
+        `started: ${(r.server_started_at || "").slice(0, 19)}Z`,
+        `live_execution: ${r.live_execution_enabled}`,
+        ...(r.files_modified_after_startup || []).map(f => `STALE: ${f}`),
+        `--- source hashes ---`,
+        ...Object.entries(r.source_hashes || {}).map(([k, v]) => `  ${k}: ${v}`),
+      ];
+      alert(lines.join("\n"));
+    };
+  } catch (e) {
+    const chip = $("#build-chip");
+    if (chip) { chip.textContent = "BUILD ?"; chip.title = "runtime endpoint unavailable"; }
+  }
+}
+
 /* ---------------- boot ---------------- */
 async function boot() {
   await loadStatus();
@@ -33,6 +65,7 @@ async function boot() {
   S.symbol = S.symbols.includes("EURAUD") ? "EURAUD" : (S.symbols[0] || "EURAUD");
   buildTfButtons(); buildSymbolList(); wire();
   openStream();
+  loadRuntime();
   await refresh();
 }
 
@@ -103,8 +136,11 @@ function identityChip(id) {
 function renderQuote(a, err) {
   const el = $("#quote-strip");
   if (!el) return;
-  if (!a) {   // FETCH_ERROR: the HTTP request itself failed
-    el.innerHTML = `<span class="q down">MARKET DATA REQUEST FAILED${err ? " — " + esc(err) : ""}</span>`;
+  if (!a) {
+    const isUnauth = err && (err.includes("403") || err.includes("UNAUTHORIZED_ACCOUNT"));
+    el.innerHTML = isUnauth
+      ? `<span class="q down">ACCOUNT UNAUTHORIZED — analysis blocked. Log MT5 into authorized demo account (477217728 @ Exness-MT5Trial9).</span>`
+      : `<span class="q down">MARKET DATA REQUEST FAILED${err ? " — " + esc(err) : ""}</span>`;
     return;
   }
   const q = a.quote || { market_data: "UNAVAILABLE" };
@@ -133,7 +169,13 @@ async function loadSetups() {
   if (S.selected && !S.setups.find(s => s.setup_id === S.selected)) S.selected = null;
   renderLifecycle(); renderSetup();
 }
-async function loadAlerts() { try { renderAlerts((await api("/api/alerts?limit=50")).alerts); } catch (e) {} }
+async function loadAlerts() {
+  try {
+    const r = await api("/api/alerts?limit=50");
+    S.alertStartupTime = r.server_startup_time || null;
+    renderAlerts(r.alerts);
+  } catch (e) {}
+}
 async function loadHypotheses() { try { renderObserver((await api("/api/hypotheses")).hypotheses); } catch (e) {} }
 async function loadHistory() { try { renderHistory((await api("/api/history")).rows); } catch (e) {} }
 
@@ -166,15 +208,19 @@ function renderReadiness(r) {
   const strip = document.getElementById("gateb-strip");
   if (!strip) return;
   const ready = r.status === "READY_FOR_MANUAL_VALIDATION";
-  strip.className = ready ? "gateb-ready" : "gateb-waiting";
+  const blocked = r.status === "UNAUTHORIZED_ACCOUNT";
+  strip.className = ready ? "gateb-ready" : (blocked ? "gateb-blocked" : "gateb-waiting");
   document.getElementById("gateb-status").textContent = ready
-    ? "READY FOR MANUAL VALIDATION" : r.status.replace(/_/g, " ");
+    ? "READY FOR MANUAL VALIDATION"
+    : (blocked ? "ACCOUNT UNAUTHORIZED — ANALYSIS BLOCKED" : r.status.replace(/_/g, " "));
   document.getElementById("gateb-detail").textContent = ready
     ? `${r.setup.setup_id} · ${r.setup.symbol} · ${r.setup.direction} · awaiting human review — no execution performed`
-    : "observation only — detection never executes";
+    : (blocked
+        ? "Log MT5 into authorized account (477217728 @ Exness-MT5Trial9 DEMO) to enable analysis."
+        : "observation only — detection never executes");
   const btn = document.getElementById("gateb-review");
   btn.classList.toggle("hidden", !ready);
-  btn.onclick = () => reviewSetup(r.setup.setup_id);
+  if (ready) btn.onclick = () => reviewSetup(r.setup.setup_id);
 }
 function reviewSetup(id) {
   // REVIEW = select & inspect. It must never place, check, or send anything.
@@ -274,17 +320,37 @@ function openStream() {
 /* ---------------- status ---------------- */
 function renderStatus() {
   const st = S.status;
-  $("#s-engine").textContent = st.engine || "–";
+  const unauth = st.account_identity === "UNAUTHORIZED";
+  const engineEl = $("#s-engine");
+  engineEl.textContent = st.engine || "–";
+  engineEl.style.color = unauth ? "var(--err, #f87171)" : "";
   $("#s-mt5").textContent = st.mt5 || "–";
   $("#s-acct").textContent = st.account_mode || "–";
   $("#s-md").textContent = st.market_data || "–";
   $("#s-risk").textContent = st.risk_engine || "–";
   $("#s-exec").textContent = st.live_execution_enabled ? "LIVE-ON" : (st.execution || "–");
   const badge = $("#account-badge");
-  badge.textContent = st.account ? `${st.account_mode} · ${st.account.server}` : "NO ACCOUNT";
-  badge.className = "badge " + (st.account_mode === "DEMO" ? "demo" : st.account_mode === "LIVE" ? "live" : "");
+  if (unauth) {
+    badge.textContent = "UNAUTHORIZED";
+    badge.className = "badge err";
+  } else {
+    badge.textContent = st.account ? `${st.account_mode} · ${st.account.server}` : "NO ACCOUNT";
+    badge.className = "badge " + (st.account_mode === "DEMO" ? "demo" : st.account_mode === "LIVE" ? "live" : "");
+  }
   $("#conn-badge").textContent = st.mt5 === "CONNECTED" ? "CONNECTED" : "DISCONNECTED";
   $("#conn-badge").className = "badge " + (st.mt5 === "CONNECTED" ? "demo" : "err");
+  const banner = $("#unauth-banner");
+  if (banner) {
+    banner.style.display = unauth ? "block" : "none";
+    if (unauth) {
+      const accts = $("#unauth-accounts");
+      if (accts) accts.textContent =
+        `Expected: ${st.authorized_account || "477217728@Exness-MT5Trial9 DEMO"}  ·  Connected: ${st.actual_account || "unknown"}`;
+      const instr = $("#unauth-instruction");
+      if (instr) instr.textContent =
+        "Log MT5 terminal into the authorized Exness demo account (477217728 @ Exness-MT5Trial9) before analysis can run.";
+    }
+  }
 }
 function updatePriceTag(p) {
   const el = $("#chart-price");
@@ -609,9 +675,13 @@ async function savePlan() {
 }
 
 function renderAlerts(rows) {
-  $("#alerts-body").innerHTML = (rows || []).length ? rows.slice(0, 40).map(a =>
-    `<div class="alert ${esc(a.kind)}"><div>${esc(a.symbol)} <b>${esc(a.kind)}</b> — ${esc(a.message)}</div>
-     <div class="a-t">${esc((a.time || "").slice(0, 19))}</div></div>`).join("") : `<div class="empty">none yet</div>`;
+  const startup = S.alertStartupTime || null;
+  $("#alerts-body").innerHTML = (rows || []).length ? rows.slice(0, 40).map(a => {
+    const historical = startup && a.time < startup;
+    return `<div class="alert ${esc(a.kind)}${historical ? " stale" : ""}">
+      <div>${historical ? `<span class="a-hist">HISTORICAL</span> ` : ""}${esc(a.symbol)} <b>${esc(a.kind)}</b> — ${esc(a.message)}</div>
+      <div class="a-t">${esc((a.time || "").slice(0, 19))}</div></div>`;
+  }).join("") : `<div class="empty">none yet</div>`;
 }
 
 function renderHistory(rows) {
