@@ -113,9 +113,13 @@ def test_entry_before_tp_does_not_expire():
     hub._apply_lifecycle_evaluation(setup.id, m15)
 
     lc = hub.registry.get(setup.id)
-    # State should NOT be ENTRY_NO_LONGER_VALID (setup is triggered or pending)
+    # State should NOT be ENTRY_NO_LONGER_VALID (the entry genuinely traded,
+    # this is not an expiry case)
     assert lc.state is not LCState.ENTRY_NO_LONGER_VALID
-    assert lc.state is LCState.EXECUTION_READY  # hub doesn't auto-fill; still EXECUTION_READY
+    # A consumed setup must NEVER remain EXECUTION_READY: the engine's own
+    # verdict here is TRIGGERED/position_open, which the hub maps to FILLED.
+    assert lc.state is LCState.FILLED
+    assert "entry_traded" in (lc.reason or "")
 
 
 # --------------------------------------------------------------------------

@@ -6,6 +6,7 @@ const TF_ORDER = ["M1", "M5", "M15", "M30", "H1", "H4", "D1"];
 const S = {
   symbol: null, tf: "M15", analysis: null, setups: [], selected: null,
   mode: "ANALYSIS", status: {}, symbols: [], prices: {}, layers: {},
+  risk: { state: "NONE", reason: "" },
 };
 const $ = (q) => document.querySelector(q);
 const $$ = (q) => document.querySelectorAll(q);
@@ -103,10 +104,13 @@ async function loadAnalysis(quiet) {
     if (my !== analysisSeq) return;                 // stale response: newer one in flight/done
     S.analysis = a;
     S.prices[sym] = a.last_closed_close;
-    drawChart(); renderQuote(); renderSetup(); renderRisk(); renderLifecycle();
+    drawChart(); renderQuote();
+    await renderRisk();                 // risk state must precede button render
+    renderSetup(); renderLifecycle();
   } catch (e) {
     if (my !== analysisSeq) return;
     S.analysis = null;
+    S.risk = { state: "UNAVAILABLE", reason: e.message };
     renderQuote(null, e.message);
     renderSetup(); renderLifecycle(); drawChart();
   }
@@ -569,10 +573,21 @@ function renderSetup() {
     <div class="kv"><span class="k">Setup ID</span><span class="v" style="color:var(--faint)">${esc(c.id)}</span></div>
     <div style="display:flex;gap:6px">
       <button class="cta ok" id="btn-dry">DRY RUN</button>
-      <button class="cta" id="btn-paper" ${S.mode === "PAPER" && S.status.paper_enabled && st.display === "EXECUTION_READY" ? "" : "disabled"}>PAPER EXECUTE</button>
+      <button class="cta" id="btn-paper" ${S.mode === "PAPER" && S.status.paper_enabled && st.display === "EXECUTION_READY" && S.risk.for === c.id && S.risk.state === "OK" ? "" : "disabled"}>PAPER EXECUTE</button>
     </div>
+    ${st.display === "EXECUTION_READY" && S.risk.for === c.id && S.risk.state === "UNAVAILABLE"
+        ? `<div class="risk-block">PAPER EXECUTION BLOCKED — RISK CHECK UNAVAILABLE</div>`
+        : st.display === "EXECUTION_READY" && S.risk.for === c.id && S.risk.state === "REJECTED"
+        ? `<div class="risk-block">PAPER EXECUTION BLOCKED — ${esc(S.risk.reason)}</div>`
+        : st.display === "EXECUTION_READY" && S.risk.for !== c.id
+        ? `<div class="risk-pending">checking risk…</div>` : ""}
     <button class="cta danger hidden" id="btn-cancel">CANCEL PENDING</button>`;
   S.selected = c.id;
+  // risk result must match the setup actually displayed; fetch it if not (no loop:
+  // the completion sets S.risk.for to this id before re-rendering)
+  if (st.display === "EXECUTION_READY" && S.risk.for !== c.id && S.risk._req !== c.id) {
+    S.risk._req = c.id; renderRisk();
+  }
   $("#btn-dry").onclick = async () => {
     try { const r = await api(`/api/dry-run/${c.id}`, { method: "POST" });
       toast(`${r.status}${r.order ? ` ${r.order.side} vol=${r.order.volume}` : (r.reason ? " " + r.reason : "")}`); }
@@ -599,6 +614,18 @@ async function renderRisk() {
   const box = $("#risk-body");
   try {
     const r = await api(`/api/risk?symbol=${S.symbol}&setup_id=${S.selected || ""}`);
+    // derive risk availability from the BACKEND status (never assume)
+    if (!S.selected) S.risk = { state: "NONE", reason: "", for: null };
+    else if (r.status === "RISK_OK") S.risk = { state: "OK", reason: "", for: S.selected };
+    else if (r.status === "RISK_REJECTED" || r.status === "RISK_PORTFOLIO_REJECTED")
+      S.risk = { state: "REJECTED", for: S.selected,
+                 reason: (r.new_setup && r.new_setup.error)
+                 || (r.validation && r.validation.error) || r.status };
+    else if (r.new_setup && r.new_setup.error)
+      S.risk = { state: "REJECTED", for: S.selected, reason: r.new_setup.error };
+    else if (r.new_setup) S.risk = { state: "OK", reason: "", for: S.selected }   // legacy payload
+    else S.risk = { state: "UNAVAILABLE", for: S.selected,
+                    reason: r.compute_error || r.status || "no risk result" };
     const ns = r.new_setup;
     box.innerHTML = `
       <div class="kv"><span class="k">Account</span><span class="v">${r.equity ? r.equity.toLocaleString(undefined, {maximumFractionDigits: 0}) + " " + esc(r.currency || "") : "—"}</span></div>
@@ -614,7 +641,11 @@ async function renderRisk() {
       <div class="kv"><span class="k">Budget</span><span class="v ${ns.portfolio_allocation === "FIT" ? "bull" : "bear"}">${esc(ns.portfolio_allocation || r.portfolio_allocation || "")}</span></div>`
       : ns && ns.error ? `<div class="kv"><span class="k">Setup</span><span class="v warn">${esc(ns.error)}</span></div>`
       : `<div class="empty">No live setup — sizing shown when engine produces one.</div>`}`;
-  } catch (e) { box.innerHTML = `<div class="empty">risk unavailable: ${esc(e.message)}</div>`; }
+  } catch (e) {
+    S.risk = { state: "UNAVAILABLE", reason: e.message, for: S.selected || null };
+    box.innerHTML = `<div class="empty">risk unavailable: ${esc(e.message)}</div>`;
+  }
+  renderSetup();   // paper button availability is derived from S.risk
 }
 
 function renderExec() {

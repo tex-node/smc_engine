@@ -56,6 +56,8 @@ input:focus,select:focus,textarea:focus{outline:1px solid var(--acc)}
 #quote-strip .q b{color:var(--txt);font-weight:600}
 #quote-strip .down{color:var(--bear)}
 #quote-strip .wait{color:var(--warn);letter-spacing:.04em}
+.risk-block{margin-top:7px;padding:5px 8px;border:1px solid var(--live);color:var(--bear);border-radius:4px;font-size:11px;letter-spacing:.03em}
+.risk-pending{margin-top:5px;color:var(--faint);font-size:10.5px}
 
 /* gate b readiness strip — OBSERVATION ONLY */
 #gateb-strip{display:flex;align-items:center;gap:14px;padding:4px 10px;font-size:11.5px;border:1px solid var(--line2);border-radius:4px;margin:4px 0}

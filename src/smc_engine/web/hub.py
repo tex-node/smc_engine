@@ -219,6 +219,17 @@ class MT5Source(MarketSource):
     def order_check(self, request):
         return self._mt5.order_check(request)
 
+    @property
+    def mt5_module(self):
+        """The underlying MetaTrader5 module (constants + order_calc_profit).
+
+        RiskEngine math requires the real module's ORDER_TYPE_* constants and
+        order_calc_profit(); passing the adapter object instead raised
+        AttributeError('MT5Source' object has no attribute 'ORDER_TYPE_SELL')
+        which surfaced as an HTTP 500 on /api/risk.
+        """
+        return self._mt5
+
     def pending_orders(self, symbol):
         return [
             {"ticket": o.ticket, "magic": o.magic, "type": o.type, "price_open": o.price_open,
@@ -1033,7 +1044,10 @@ class EngineHub:
         if not spec:
             return None
         if symbol not in self.risk_engines:
-            mt5mod = self.source if isinstance(self.source, MT5Source) else None
+            # RiskEngine expects the MetaTrader5 MODULE (ORDER_TYPE_* +
+            # order_calc_profit), not the adapter. Test/offline sources
+            # expose no module -> RiskEngine uses its spec-arithmetic fallback.
+            mt5mod = getattr(self.source, "mt5_module", None)
             self.risk_engines[symbol] = RiskEngine(SymbolSpec(**spec), mt5_module=mt5mod)
         return self.risk_engines[symbol]
 
@@ -1047,38 +1061,97 @@ class EngineHub:
         return total
 
     def risk_snapshot(self, symbol: str, setup_id: Optional[str] = None) -> dict:
-        acct = self.source.account() or {}
+        """Deterministic structured risk result — never a bare 500.
+
+        status: RISK_OK | RISK_REJECTED | RISK_PORTFOLIO_REJECTED
+                RISK_UNAVAILABLE | RISK_NOT_REQUESTED
+        Legacy keys (equity/committed_risk_percent/new_setup/portfolio_allocation)
+        are preserved for existing consumers; the structured keys follow the
+        agreed schema. No sizing math lives here: all values come from
+        RiskEngine/ExecutionPolicy.
+        """
+        try:
+            acct = self.source.account() or {}
+        except Exception:
+            acct = {}
+        try:
+            identity = self._identity()
+        except Exception:
+            identity = {"login": None, "server": None, "account_class": "DISCONNECTED",
+                        "source": getattr(self.source, "name", "unknown"), "connected": False}
         equity = float(acct.get("equity") or acct.get("balance") or 0)
-        re_ = self.risk_engine(symbol)
+        re_, meta_error = None, None
+        try:
+            re_ = self.risk_engine(symbol)
+        except Exception as exc:
+            meta_error = f"symbol metadata failed: {exc}"
         committed = self._committed_percent()
         out = {
-            "symbol": symbol, "equity": equity, "currency": acct.get("currency"),
+            "symbol": symbol, "setup_id": setup_id, "account_identity": identity,
+            "equity": equity, "currency": acct.get("currency"),
             "max_total_risk_percent": MAX_TOTAL_RISK_PERCENT,
             "committed_risk_percent": round(committed, 2),
             "available_risk_percent": round(MAX_TOTAL_RISK_PERCENT - committed, 2),
+            "committed_portfolio_risk": round(committed, 2),
+            "available_portfolio_risk": round(MAX_TOTAL_RISK_PERCENT - committed, 2),
+            "requested_risk": None, "stop_distance": None, "computed_volume": None,
+            "estimated_loss": None, "portfolio_gate": None, "validation": None,
+            "status": "RISK_NOT_REQUESTED", "compute_error": meta_error,
             "new_setup": None, "broker_view": None,
         }
-        if setup_id and re_:
-            lc = self.registry.get(setup_id)
-            if lc and norm_symbol(lc.setup.symbol) != norm_symbol(symbol):
-                raise ValueError(f"setup {setup_id} belongs to {lc.setup.symbol}, not {symbol}")
-            if lc:
-                try:
-                    re_.validate_setup(lc.setup)
-                    policy = ExecutionPolicy(re_)
-                    order = policy.build_order(lc.setup, equity or 1.0)
-                    loss = (equity or 0) * lc.setup.risk_percent / 100.0
-                    out["new_setup"] = {
-                        "setup_id": setup_id, "risk_percent": lc.setup.risk_percent,
-                        "volume": order.volume, "estimated_loss": round(loss, 2),
-                        "reward_risk": round(lc.setup.reward_distance / lc.setup.risk_distance, 3)
-                        if lc.setup.risk_distance else None,
-                    }
-                    budget = allocate_portfolio_risk_budget(
-                        [lc.setup], committed, MAX_TOTAL_RISK_PERCENT)
-                    out["portfolio_allocation"] = "FIT" if budget else "EXCEEDS_BUDGET"
-                except ValueError as exc:
-                    out["new_setup"] = {"setup_id": setup_id, "error": str(exc)}
+        if not setup_id:
+            out["status"] = "RISK_UNAVAILABLE" if meta_error else "RISK_NOT_REQUESTED"
+            return out
+        lc = self.registry.get(setup_id)
+        if lc is None:
+            out["status"] = "RISK_UNAVAILABLE"
+            out["compute_error"] = f"unknown setup {setup_id}"
+            return out
+        if norm_symbol(lc.setup.symbol) != norm_symbol(symbol):
+            raise ValueError(f"setup {setup_id} belongs to {lc.setup.symbol}, not {symbol}")
+        out["requested_risk"] = lc.setup.risk_percent
+        out["stop_distance"] = (round(abs(lc.setup.entry - lc.setup.stop_loss), 8)
+                                if lc.setup.entry is not None and lc.setup.stop_loss is not None
+                                else None)
+        if re_ is None:
+            out["status"] = "RISK_UNAVAILABLE"
+            out["compute_error"] = meta_error or (
+                "no broker symbol metadata (MT5 source unavailable)")
+            out["new_setup"] = {"setup_id": setup_id, "error": out["compute_error"]}
+            return out
+        try:
+            re_.validate_setup(lc.setup)
+            order = ExecutionPolicy(re_).build_order(lc.setup, equity or 1.0)
+            loss = (equity or 0) * lc.setup.risk_percent / 100.0
+            out["computed_volume"] = order.volume
+            out["estimated_loss"] = round(loss, 2)
+            out["validation"] = {"ok": True}
+            out["new_setup"] = {
+                "setup_id": setup_id, "risk_percent": lc.setup.risk_percent,
+                "volume": order.volume, "estimated_loss": round(loss, 2),
+                "reward_risk": round(lc.setup.reward_distance / lc.setup.risk_distance, 3)
+                if lc.setup.risk_distance else None,
+            }
+            budget = allocate_portfolio_risk_budget(
+                [lc.setup], committed, MAX_TOTAL_RISK_PERCENT)
+            gate = "FIT" if budget else "EXCEEDS_BUDGET"
+            out["portfolio_gate"] = gate
+            out["portfolio_allocation"] = gate          # legacy key
+            out["status"] = "RISK_OK" if budget else "RISK_PORTFOLIO_REJECTED"
+            if not budget:
+                out["validation"] = {"ok": False,
+                                     "error": "portfolio risk budget exhausted"}
+        except ValueError as exc:
+            out["status"] = "RISK_REJECTED"
+            out["validation"] = {"ok": False, "error": str(exc)}
+            out["new_setup"] = {"setup_id": setup_id, "error": str(exc)}
+        except Exception as exc:  # adapter/broker failures surface structured, never 500
+            import logging
+            logging.getLogger(__name__).exception("risk computation failed for %s", setup_id)
+            out["status"] = "RISK_UNAVAILABLE"
+            out["compute_error"] = f"{type(exc).__name__}: {exc}"
+            out["validation"] = {"ok": False, "error": out["compute_error"]}
+            out["new_setup"] = {"setup_id": setup_id, "error": out["compute_error"]}
         return out
 
     # ---------- paper execution (backend-enforced) ----------
@@ -1325,6 +1398,23 @@ class EngineHub:
         elif result.state is ReplayState.FILLED:
             try:
                 self._transition(setup_id, LCState.FILLED, result.reason)
+            except ValueError:
+                pass
+        elif result.state is ReplayState.TRIGGERED:
+            # Engine verdict: the limit entry has already traded
+            # ("position_open"). A consumed setup must NEVER remain
+            # EXECUTION_READY — map it to the lifecycle state the machine
+            # already permits (EXECUTION_READY -> FILLED).
+            try:
+                self._transition(setup_id, LCState.FILLED, f"entry_traded: {result.reason}")
+            except ValueError:
+                pass
+        elif result.state is ReplayState.AMBIGUOUS:
+            # Entry+stop (or stop+target) touched in one candle: conservative
+            # admission failure, never left executable.
+            try:
+                self._transition(setup_id, LCState.ENTRY_NO_LONGER_VALID,
+                                 f"ambiguous: {result.reason}")
             except ValueError:
                 pass
 
