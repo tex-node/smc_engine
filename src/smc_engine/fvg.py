@@ -38,14 +38,14 @@ def detect_fvgs(df: pd.DataFrame) -> list[FairValueGap]:
     for i in range(2, len(df)):
         if lows[i] > highs[i - 2]:
             gap = FairValueGap(
-                id=f"FVG-B-{i}", direction=Direction.BULLISH,
+                id=f"FVG-B-{int(pd.Timestamp(times[i]).value)}", direction=Direction.BULLISH,
                 top=lows[i], bottom=highs[i - 2], created_index=i,
                 created_time=times[i],
             )
             fvgs.append(gap)
         elif highs[i] < lows[i - 2]:
             gap = FairValueGap(
-                id=f"FVG-S-{i}", direction=Direction.BEARISH,
+                id=f"FVG-S-{int(pd.Timestamp(times[i]).value)}", direction=Direction.BEARISH,
                 top=lows[i - 2], bottom=highs[i], created_index=i,
                 created_time=times[i],
             )

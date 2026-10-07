@@ -43,6 +43,8 @@ from ..structure import (
 )
 from .history import SetupEventHistory, timeframe_from_id
 from .runtime import build_fingerprint, record_startup
+from ..opportunity import OpportunityEngine, OpportunityRepository
+from ..opportunity import evaluator as opp_evaluator
 
 TIMEFRAMES = {
     "M1": 1, "M5": 5, "M15": 15, "M30": 30,
@@ -399,6 +401,13 @@ class EngineHub:
         self._poller: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._history_failures = 0
+        # ---------- opportunity layer (non-executing; UI-independent) ----------
+        self.opportunities = OpportunityEngine(OpportunityRepository(db_path),
+                                               config=MultiTimeframeConfig())
+        self._opp_last_m15: dict[str, object] = {}
+        self._symbol_diag: dict[str, dict] = {}
+        self._last_scan: dict = {}
+        self._last_scan_time: Optional[str] = None
 
     # ---------- account identity gate ----------
     def _account_identity(self) -> dict:
@@ -499,6 +508,8 @@ class EngineHub:
                 "detected_ids": [r["setup_id"] for r in valid],
                 "rejected_incomplete": rejected_incomplete,
                 "terminal_historical_count": terminal_historical_count,
+                "opportunities": self.active_opportunities(symbol),
+                "opportunity_audit": self.opportunity_audit(symbol) if symbol else None,
                 "mode": "GATE B WAITING FOR MANUAL VALIDATION — NO AUTO-EXECUTION",
             }
         return {
@@ -507,6 +518,8 @@ class EngineHub:
             "detected_ids": [],
             "rejected_incomplete": rejected_incomplete,
             "terminal_historical_count": terminal_historical_count,
+            "opportunities": self.active_opportunities(symbol),
+            "opportunity_audit": self.opportunity_audit(symbol) if symbol else None,
             "mode": "OBSERVATION — VALID MARKET STATE, NOT AN ERROR",
         }
 
@@ -632,6 +645,15 @@ class EngineHub:
         idm = find_inducements(df, obs, swings)
         pois = [update_poi_lifecycle(p, df) for p in build_d1_pois(df)]
         candidates = self.candidates_for(symbol)
+        # Opportunity layer observation for the actively-viewed symbol.
+        # Discovery itself never depends on this path (see scan_universe_once).
+        try:
+            self._dispatch_opportunity_events(
+                self.opportunities.observe(symbol, self._causal_view(symbol)))
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception(
+                "opportunity observation failed for %s (analysis unaffected)", symbol)
         last = df.iloc[-1]
         quote = self._quote_block(symbol)
         snapshot = {
@@ -671,6 +693,8 @@ class EngineHub:
                 ),
             },
             "quote": quote,
+            "opportunities": self.active_opportunities(symbol),
+            "opportunity_audit": self.opportunity_audit(symbol),
             "last_closed_candle_time": str(last["time"]),
             "candles": [[str(r.time), float(r.open), float(r.high), float(r.low), float(r.close)]
                         for r in df.itertuples()],
@@ -1418,6 +1442,140 @@ class EngineHub:
             except ValueError:
                 pass
 
+    # ---------- opportunity layer / background watcher (UI-independent) ----------
+    def eligible_symbols(self) -> list[str]:
+        """Authoritative broker universe (never the UI-selected symbol list)."""
+        try:
+            return [s for s in (self.source.symbols() or []) if s]
+        except Exception:
+            return []
+
+    def _last_closed_m15(self, symbol: str):
+        try:
+            df = self.source.bars(symbol, TIMEFRAMES["M15"], 1)
+            return df["time"].iloc[-1] if len(df) else None
+        except Exception:
+            return None
+
+    def _causal_view(self, symbol: str):
+        d1 = self.bars(symbol, "D1", 150)
+        h4 = self.bars(symbol, "H4", 400)
+        m15 = self.bars(symbol, "M15", 500)
+        return opp_evaluator.build_view(symbol, d1, h4, m15, None, MultiTimeframeConfig())
+
+    def _dispatch_opportunity_events(self, res: dict) -> None:
+        """Backend alert dispatch — runs regardless of any UI connection."""
+        for ev in res.get("events", []):
+            try:
+                self.web.add_alert(ev.get("symbol", "?"), "causal", ev.get("kind", "OPPORTUNITY"),
+                                   ev.get("message", ""), level="OPPORTUNITY")
+                self.events.publish(ev.get("kind", "OPPORTUNITY_ADVANCED"), ev)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception("opportunity alert dispatch failed")
+
+    def scan_universe_once(self, force: bool = False) -> dict:
+        """One authoritative background cycle.
+
+        Enumerates the broker universe, applies the closed-M15 gate per symbol,
+        runs the causal view, advances the opportunity engine, persists and
+        dispatches alerts. Requires no browser, no selection, no HTTP request.
+        Per-symbol isolation: one failure cannot starve the scan.
+        """
+        now = pd.Timestamp.now(tz="UTC").isoformat()
+        stats = {"symbols_scanned": 0, "symbols_succeeded": 0, "symbols_failed": 0,
+                 "symbols_skipped": 0, "opportunities_created": 0,
+                 "opportunities_advanced": 0, "opportunities_invalidated": 0,
+                 "opportunities_expired": 0, "converted_to_setup": 0,
+                 "alerts_emitted": 0, "alerts_deduplicated": 0, "events": []}
+        data_now = None
+        for sym in self.eligible_symbols():
+            try:
+                last = self._last_closed_m15(sym)
+                if not force and last is not None and self._opp_last_m15.get(sym) == last:
+                    stats["symbols_skipped"] += 1
+                    continue
+                self._opp_last_m15[sym] = last
+                if last is not None:
+                    data_now = last if data_now is None else max(data_now, last)
+                stats["symbols_scanned"] += 1
+                view = self._causal_view(sym)
+                res = self.opportunities.observe(sym, view)
+                self._dispatch_opportunity_events(res)
+                stats["opportunities_created"] += len(res["created"])
+                stats["opportunities_advanced"] += len(res["advanced"])
+                stats["opportunities_invalidated"] += len(res["invalidated"])
+                stats["opportunities_expired"] += len(res["expired"])
+                stats["converted_to_setup"] += len(res["converted"])
+                stats["events"].extend(res["events"])
+                d = self._symbol_diag.setdefault(sym, {})
+                d.update({"last_analysis_time": now,
+                          "last_data_time": str(last) if last is not None else None,
+                          "last_error": None,
+                          "current_opportunity_count":
+                              len(self.opportunities.repo.query(symbol=sym, active_only=True, limit=100))})
+                if res["events"]:
+                    d["last_opportunity_time"] = now
+                stats["symbols_succeeded"] += 1
+            except Exception as exc:
+                stats["symbols_failed"] += 1
+                self._symbol_diag.setdefault(sym, {})["last_error"] = f"{type(exc).__name__}: {exc}"
+                continue
+        try:
+            # TTL sweep is anchored to the latest CLOSED market data time, not
+            # the wall clock: the closed-M15 cadence is authoritative.
+            self.opportunities.expire_cycle(now=data_now)
+        except Exception:
+            pass
+        diag = self.opportunities.diagnostics()
+        stats["alerts_emitted"] = diag.get("alerts_emitted", 0)
+        stats["alerts_deduplicated"] = diag.get("alerts_deduplicated", 0)
+        stats["last_scan_time"] = now
+        self._last_scan = stats
+        self._last_scan_time = now
+        return stats
+
+    def opportunity_diagnostics(self) -> dict:
+        eng = self.opportunities.diagnostics()
+        out = dict(eng)
+        out.update({
+            "watcher_running": bool(self._poller and self._poller.is_alive()),
+            "last_scan_time": self._last_scan_time,
+            "last_scan": dict(self._last_scan),
+            "symbols": dict(self._symbol_diag),
+            "universe_size": len(self.eligible_symbols()),
+        })
+        return out
+
+    def opportunity_audit(self, symbol: str) -> dict:
+        return self.opportunities.audit(symbol)
+
+    def active_opportunities(self, symbol: Optional[str] = None) -> list[dict]:
+        rows = []
+        for opp in self.opportunities.repo.query(symbol=symbol, active_only=True, limit=200):
+            rows.append(self._opportunity_view(opp))
+        return rows
+
+    @staticmethod
+    def _opportunity_view(opp) -> dict:
+        from ..opportunity.models import STATE_LABEL
+        return {
+            "opportunity_id": opp.opportunity_id, "symbol": opp.symbol,
+            "direction": opp.direction, "type": opp.opportunity_type,
+            "state": opp.state, "label": STATE_LABEL.get(
+                opp.state, opp.state),
+            "created_at": str(opp.created_at), "updated_at": str(opp.updated_at),
+            "expires_at": str(opp.expires_at) if opp.expires_at else None,
+            "first_seen": str(opp.first_seen), "last_seen": str(opp.last_seen),
+            "sweep": opp.sweep_evidence, "csd": opp.csd_evidence,
+            "bos": opp.bos_evidence, "selected_poi": opp.selected_poi,
+            "poi_candidates": opp.poi_candidates, "idm_reference": opp.idm_reference,
+            "entry_pathway": opp.entry_pathway, "blocker": opp.blocker,
+            "next_expected": opp.next_expected, "reason": opp.reason,
+            "setup_id": opp.setup_id, "risk_status": opp.risk_status,
+            "lifecycle_status": opp.lifecycle_status,
+        }
+
     # ---------- poller ----------
     def start_poller(self, interval: float = 15.0) -> None:
         if self._poller and self._poller.is_alive():
@@ -1426,13 +1584,10 @@ class EngineHub:
 
         def loop():
             while not self._stop.wait(interval):
-                for sym in list(self.watchlist):
-                    try:
-                        cands = self.candidates_for(sym)
-                        self.events.publish("MARKET_UPDATE", {"symbol": sym,
-                                                              "candidates": len(cands)})
-                    except Exception:
-                        continue
+                try:
+                    self.scan_universe_once()
+                except Exception:
+                    continue
 
         self._poller = threading.Thread(target=loop, daemon=True)
         self._poller.start()

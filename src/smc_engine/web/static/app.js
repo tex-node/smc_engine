@@ -89,11 +89,11 @@ function wire() {
   ["f-status", "f-dir", "f-symbol"].forEach(id => $("#" + id).oninput = renderHistory);
   setInterval(() => { $("#clock").textContent = new Date().toISOString().slice(11, 19) + "Z"; }, 1000);
   setInterval(() => { if (!document.hidden) loadAnalysis(true); }, 20000);
-  setInterval(() => { if (!document.hidden) { loadReadiness(); loadCausalEvents(); } }, 45000);
+  setInterval(() => { if (!document.hidden) { loadReadiness(); loadCausalEvents(); loadOpportunities(); } }, 45000);
 }
 
 /* ---------------- data loads ---------------- */
-async function refresh() { await Promise.all([loadAnalysis(), loadSetups(), loadAlerts(), loadHypotheses(), loadHistory(), loadReadiness(), loadCausalEvents()]); }
+async function refresh() { await Promise.all([loadAnalysis(), loadSetups(), loadAlerts(), loadHypotheses(), loadHistory(), loadReadiness(), loadCausalEvents(), loadOpportunities()]); }
 
 let analysisSeq = 0;
 async function loadAnalysis(quiet) {
@@ -182,6 +182,58 @@ async function loadAlerts() {
 }
 async function loadHypotheses() { try { renderObserver((await api("/api/hypotheses")).hypotheses); } catch (e) {} }
 async function loadHistory() { try { renderHistory((await api("/api/history")).rows); } catch (e) {} }
+
+/* ---------------- OPPORTUNITIES (developing trades; view-only) ---------------- */
+async function loadOpportunities() {
+  try {
+    const r = await api("/api/opportunities?active_only=true");
+    renderOpportunities(r.opportunities || [], r.funnel || {});
+  } catch (e) { /* keep last calm state */ }
+}
+function _oppAge(iso) {
+  if (!iso) return "—";
+  const m = (Date.now() - new Date(iso).getTime()) / 60000;
+  return m < 60 ? `${Math.max(0, Math.round(m))}m` : `${(m / 60).toFixed(1)}h`;
+}
+function renderOpportunities(rows, funnel) {
+  const box = $("#opp-body");
+  const f = $("#opp-funnel");
+  if (f) f.textContent = `ready ${funnel.ready_opportunity_count ?? 0} · dev ${
+    (funnel.waiting_for_confirmation || 0) + (funnel.waiting_for_poi || 0) + (funnel.waiting_for_idm || 0)} · armed ${
+    funnel.opportunities_armed ?? 0} · inv ${funnel.invalidated_count ?? 0} · exp ${funnel.expired_count ?? 0}`;
+  if (!rows.length) {
+    box.innerHTML = `<div class="empty">No developing opportunities — observation only.</div>`;
+    return;
+  }
+  const progress = (o) => {
+    const bits = [];
+    if (o.sweep && o.sweep.id) bits.push("SWEEP");
+    if (o.bos && o.bos.id) bits.push("BOS");
+    if (o.csd && o.csd.id) bits.push("CSD");
+    if (o.selected_poi) bits.push("POI");
+    if (o.idm_reference) bits.push("IDM");
+    if (o.state === "READY_FOR_MITIGATION") bits.push("READY");
+    if (o.state === "ENTRY_TRIGGERED") bits.push("ENTRY");
+    return bits.join(" → ") || "—";
+  };
+  box.innerHTML = rows.map(o => `
+    <div class="opp ${esc(o.label)}" data-sym="${esc(o.symbol)}">
+      <div><b>${esc(o.symbol)}</b> ${o.direction === "BULLISH" ? "▲ BULL" : "▼ BEAR"}
+        · ${esc(o.type)} · <b>${esc(o.label)}</b></div>
+      <div class="opp-line">${esc(progress(o))}</div>
+      <div class="opp-line">POI: ${esc((o.selected_poi || "").slice(0, 28) || "waiting")} ·
+        ENTRY: ${esc(o.entry_pathway)} · age ${_oppAge(o.created_at)} ·
+        expires ${o.expires_at ? esc(String(o.expires_at).slice(5, 16)) : "—"}</div>
+      ${o.blocker ? `<div class="opp-line opp-block">BLOCKER: ${esc(o.blocker)}${o.next_expected ? " · next: " + esc(o.next_expected) : ""}</div>` : ""}
+      <div class="opp-line">RISK: ${esc(o.risk_status || "pending")} · SETUP: ${esc(o.setup_id || "—")}</div>
+    </div>`).join("");
+  box.querySelectorAll("[data-sym]").forEach(el =>
+    el.onclick = () => {                 // VIEWING only — never drives discovery
+      S.symbol = el.dataset.sym; $("#p-symbol").value = S.symbol;
+      buildSymbolList(); refresh();
+    });
+}
+
 
 /* ---------------- GATE B READINESS (observation only — never executes) ----------------
    Consumes /api/readiness, which derives state from the engine lifecycle.
@@ -317,6 +369,15 @@ function openStream() {
     es.addEventListener(k, (ev) => { loadSetups(); loadHistory(); loadCausalEvents();
       toast(`${k}: ${JSON.parse(ev.data).payload.setup_id || ""}`); }));
   es.addEventListener("ALERT_CREATED", () => loadAlerts());
+  ["OPPORTUNITY_CREATED", "OPPORTUNITY_ADVANCED", "POI_FOUND", "IDM_CONFIRMED", "READY",
+   "INVALIDATED", "EXPIRED", "CONVERTED_TO_SETUP"].forEach(k =>
+    es.addEventListener(k, (ev) => {
+      try {
+        const p = JSON.parse(ev.data).payload || {};
+        toast(`${k}: ${p.symbol || ""} ${p.state || ""}`);
+      } catch (e) {}
+      loadOpportunities(); loadAlerts();
+    }));
   es.onerror = () => { $("#conn-badge").textContent = "STREAM DOWN"; $("#conn-badge").className = "badge err"; };
   es.onopen = () => renderStatus();
 }

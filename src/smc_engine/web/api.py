@@ -211,6 +211,38 @@ def create_app(hub: Optional[EngineHub] = None) -> FastAPI:
         """
         return _jsonable(H().readiness(symbol))
 
+    # ---------- opportunity layer (developing opportunities; non-executing) ----------
+    @app.get("/api/opportunities")
+    def opportunities(symbol: Optional[str] = None, state: Optional[str] = None,
+                      type: Optional[str] = None, active_only: bool = True):
+        hub = H()
+        if active_only:
+            items = hub.active_opportunities(symbol)
+        else:
+            items = [_jsonable(H()._opportunity_view(o)) for o in
+                     hub.opportunities.repo.query(symbol=symbol, state=state,
+                                                  opportunity_type=type, limit=200)]
+        if state or type:
+            items = [i for i in items if (not state or i["state"] == state)
+                     and (not type or i["type"] == type)]
+        return _jsonable({"opportunities": items,
+                          "funnel": hub.opportunities.funnel(),
+                          "windows": hub.opportunities.windows.as_dict()})
+
+    @app.get("/api/opportunities/diagnostics")
+    def opportunities_diagnostics():
+        return _jsonable(H().opportunity_diagnostics())
+
+    @app.get("/api/opportunities/{opportunity_id}")
+    def opportunity_detail(opportunity_id: str):
+        hub = H()
+        opp = hub.opportunities.repo.get(opportunity_id)
+        if opp is None:
+            raise HTTPException(404, "unknown opportunity")
+        return _jsonable({"opportunity": hub._opportunity_view(opp),
+                          "history": hub.opportunities.repo.history(opportunity_id),
+                          "audit": hub.opportunity_audit(opp.symbol)})
+
     # ---------- causal setup event history (read-only audit surface) ----------
     @app.get("/api/setup-history")
     def setup_history(symbol: Optional[str] = None, timeframe: Optional[str] = None,
