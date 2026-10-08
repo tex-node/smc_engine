@@ -46,6 +46,7 @@ from .runtime import build_fingerprint, record_startup
 from .dbwrite import run_write, serialized_read, serialized_write, db_write_diagnostics
 from ..opportunity import OpportunityEngine, OpportunityRepository
 from ..opportunity import evaluator as opp_evaluator
+from ..opportunity.funnel import FunnelRepository
 
 TIMEFRAMES = {
     "M1": 1, "M5": 5, "M15": 15, "M30": 30,
@@ -411,6 +412,7 @@ class EngineHub:
         # ---------- opportunity layer (non-executing; UI-independent) ----------
         self.opportunities = OpportunityEngine(OpportunityRepository(db_path),
                                                config=MultiTimeframeConfig())
+        self.funnel = FunnelRepository(db_path)
         self._opp_last_m15: dict[str, object] = {}
         self._symbol_diag: dict[str, dict] = {}
         self._last_scan: dict = {}
@@ -1471,6 +1473,18 @@ class EngineHub:
         m15 = self.bars(symbol, "M15", 500)
         return opp_evaluator.build_view(symbol, d1, h4, m15, None, MultiTimeframeConfig())
 
+    def _trace_funnel(self, symbol: str) -> list:
+        """Run trace_chain() for symbol and return the emitted FunnelEvents."""
+        d1 = self.bars(symbol, "D1", 150)
+        h4 = self.bars(symbol, "H4", 400)
+        m15 = self.bars(symbol, "M15", 500)
+        if d1 is None or h4 is None or m15 is None:
+            return []
+        if len(d1) < 5 or len(h4) < 10 or len(m15) < 10:
+            return []
+        prov = CausalMTFAnalyzer(symbol, MultiTimeframeConfig()).trace_chain(d1, h4, m15)
+        return prov.funnel_events
+
     def _dispatch_opportunity_events(self, res: dict) -> None:
         """Backend alert dispatch — runs regardless of any UI connection."""
         for ev in res.get("events", []):
@@ -1508,6 +1522,14 @@ class EngineHub:
                     data_now = last if data_now is None else max(data_now, last)
                 stats["symbols_scanned"] += 1
                 view = self._causal_view(sym)
+                try:
+                    funnel_events = self._trace_funnel(sym)
+                    if funnel_events:
+                        self.funnel.persist_events(funnel_events)
+                except Exception:
+                    import logging
+                    logging.getLogger(__name__).debug(
+                        "funnel trace failed for %s", sym, exc_info=True)
                 res = self.opportunities.observe(sym, view)
                 self._dispatch_opportunity_events(res)
                 stats["opportunities_created"] += len(res["created"])

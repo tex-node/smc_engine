@@ -243,6 +243,24 @@ def create_app(hub: Optional[EngineHub] = None) -> FastAPI:
                           "history": hub.opportunities.repo.history(opportunity_id),
                           "audit": hub.opportunity_audit(opp.symbol)})
 
+    # ---------- pre-arm funnel (read-only research surface) ----------
+    @app.get("/api/research/funnel")
+    def research_funnel(symbol: Optional[str] = None, limit: int = 500):
+        hub = H()
+        return _jsonable({
+            "events": hub.funnel.recent_events(symbol=symbol, limit=limit),
+            "aggregate": hub.funnel.aggregate(symbol=symbol),
+        })
+
+    @app.get("/api/research/funnel/{symbol}")
+    def research_funnel_symbol(symbol: str, limit: int = 500):
+        hub = H()
+        return _jsonable({
+            "symbol": symbol,
+            "events": hub.funnel.recent_events(symbol=symbol, limit=limit),
+            "aggregate": hub.funnel.aggregate(symbol=symbol),
+        })
+
     # ---------- causal setup event history (read-only audit surface) ----------
     @app.get("/api/setup-history")
     def setup_history(symbol: Optional[str] = None, timeframe: Optional[str] = None,

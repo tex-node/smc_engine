@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import hashlib
 
 import pandas as pd
 
@@ -53,6 +54,25 @@ _CHAIN_STAGES = ("D1_POI", "H4_SWEEP", "H4_CSD", "M15_OB", "M15_MITIGATION", "M1
 
 
 @dataclass
+class FunnelEvent:
+    """One pre-arm rejection or advancement emitted during trace_chain().
+
+    Separates wall-clock observation time (scan_timestamp) from the market
+    event anchor (market_event_timestamp). Only minimal scalar data is stored —
+    no OHLC frames or raw bar sequences.
+    """
+    symbol: str
+    scan_timestamp: str          # wall-clock ISO UTC at scan time
+    market_event_timestamp: str  # candle_time of the causal anchor (sweep/BOS)
+    stage: str                   # FunnelStage value
+    reason: str                  # FunnelReason value
+    direction: str               # BULLISH / BEARISH / UNKNOWN
+    causal_anchor_ref: str = ""  # sweep.id, bos.id etc.
+    evidence_timestamp: str = "" # time of supporting evidence (CSD, OB, IDM)
+    config_fingerprint: str = "" # short stable hash of key config parameters
+
+
+@dataclass
 class CausalProvenance:
     """Per-symbol causal chain trace.  Reports deepest rejection stage reached.
 
@@ -82,6 +102,7 @@ class CausalProvenance:
     rejection_stage: str = "D1_POI"
     rejection_reason: str = "no active D1 POI at any sweep time"
     rr_gate: str = ""
+    funnel_events: list = field(default_factory=list)  # list[FunnelEvent]
 
 
 class CausalMTFAnalyzer:
@@ -259,6 +280,27 @@ class CausalMTFAnalyzer:
                 prov.rejection_stage = stage
                 prov.rejection_reason = reason
 
+        _scan_ts = pd.Timestamp.now('UTC').isoformat()
+        _cfg_fp = hashlib.md5(
+            f"{self.config.d1_poi_lookback}|{self.config.h4_csd_window}"
+            f"|{self.config.h4_sweep_lookback}|{self.config.m15_idm_window}"
+            f"|{self.config.min_rr}".encode()
+        ).hexdigest()[:8]
+
+        def _emit(stage: str, reason: str, sweep, direction: str = "UNKNOWN",
+                  evidence_timestamp: str = "") -> None:
+            prov.funnel_events.append(FunnelEvent(
+                symbol=self.symbol,
+                scan_timestamp=_scan_ts,
+                market_event_timestamp=str(getattr(sweep, 'candle_time', '')),
+                stage=stage,
+                reason=reason,
+                direction=direction,
+                causal_anchor_ref=str(getattr(sweep, 'id', '')),
+                evidence_timestamp=evidence_timestamp,
+                config_fingerprint=_cfg_fp,
+            ))
+
         for sweep in sweeps:
             d1_sweep_end = _latest_index_at_or_before(d1_view, sweep.candle_time)
             if d1_sweep_end < 0:
@@ -270,17 +312,22 @@ class CausalMTFAnalyzer:
                 config=DisplacementConfig(),
             )
             if not pois:
+                _emit("D1_POI", "NO_D1_POI", sweep)
                 continue
 
             for poi in pois:
                 prov.d1_poi_count += 1
                 desired_side = LiquiditySide.SELL_SIDE if poi.direction is Direction.BULLISH else LiquiditySide.BUY_SIDE
+                poi_dir = poi.direction.value if hasattr(poi.direction, 'value') else str(poi.direction)
                 if sweep.side is not desired_side:
                     _deepen("H4_SWEEP",
                             f"sweep {sweep.side.value} doesn't match {poi.direction.value} POI (needs {desired_side.value})")
+                    _emit("H4_SWEEP", "D1_POI_DIRECTION_MISMATCH", sweep, direction=poi_dir)
                     continue
                 if not (poi.created_time <= sweep.candle_time):
                     _deepen("H4_SWEEP", "POI created after sweep candle time")
+                    _emit("H4_SWEEP", "D1_POI_INVALID", sweep, direction=poi_dir,
+                          evidence_timestamp=str(poi.created_time))
                     continue
                 prov.matching_sweep_count += 1
 
@@ -294,6 +341,7 @@ class CausalMTFAnalyzer:
                 if csd is None:
                     _deepen("H4_CSD",
                             f"no confirming CSD within {self.config.h4_csd_window} H4 bars after sweep")
+                    _emit("H4_CSD", "NO_CSD", sweep, direction=poi_dir)
                     continue
 
                 m15_end_for_csd = _latest_index_at_or_before(m15_view, csd.candle_time)
@@ -311,6 +359,8 @@ class CausalMTFAnalyzer:
                 prov.post_csd_ob_count += len(blocks)
                 if not blocks:
                     _deepen("M15_OB", "no M15 OB formed after CSD")
+                    _emit("M15_OB", "NO_POST_CSD_POI", sweep, direction=poi_dir,
+                          evidence_timestamp=str(csd.candle_time))
                     continue
 
                 swings_after = [
@@ -329,6 +379,8 @@ class CausalMTFAnalyzer:
                     ]
                     if not idms:
                         _deepen("M15_IDM", "no IDM/inducement confirmed for OB")
+                        _emit("M15_IDM", "NO_IDM", sweep, direction=poi_dir,
+                              evidence_timestamp=str(csd.candle_time))
                         continue
 
                     prov.idm_count += len(idms)
@@ -360,10 +412,14 @@ class CausalMTFAnalyzer:
                         )
                         if irl_structural is None:
                             _deepen("IRL", "no structural IRL target in M15 swing pool")
+                            _emit("IRL", "IRL_MISSING", sweep, direction=poi_dir,
+                                  evidence_timestamp=str(csd.candle_time))
                             continue
 
                         prov.structurally_qualified_count += 1
                         _deepen("READY", f"structurally qualified: {prov.structurally_qualified_count}")
+                        _emit("READY", "ADVANCED", sweep, direction=poi_dir,
+                              evidence_timestamp=str(csd.candle_time))
 
                         # RR gate check (only when a threshold is configured).
                         if self.config.min_rr > 0.0:
@@ -376,6 +432,8 @@ class CausalMTFAnalyzer:
                             )
                             if irl is None:
                                 prov.rr_filtered_count += 1
+                                _emit("READY", "RR_FILTERED", sweep, direction=poi_dir,
+                                      evidence_timestamp=str(csd.candle_time))
                                 continue
                         else:
                             irl = irl_structural
@@ -388,7 +446,11 @@ class CausalMTFAnalyzer:
                             prov.execution_ready_count += 1
                             prov.qualified_candidate_count += 1
                             _deepen("READY", f"{prov.qualified_candidate_count} candidate(s) qualified")
+                            _emit("READY", "EXECUTION_READY", sweep, direction=poi_dir,
+                                  evidence_timestamp=str(csd.candle_time))
                         except ValueError as exc:
                             _deepen("IRL", f"setup build failed: {exc}")
+                            _emit("IRL", "SETUP_BUILD_FAILED", sweep, direction=poi_dir,
+                                  evidence_timestamp=str(csd.candle_time))
 
         return prov
