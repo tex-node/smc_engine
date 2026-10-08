@@ -131,9 +131,11 @@ def _bars_since(time_value, last_time, minutes: int = 15) -> int:
 
 def poi_candidates(view: CausalView, direction: Direction,
                    windows: OpportunityWindows,
-                   created_after=None) -> list[POICandidate]:
+                   created_after=None, created_before=None) -> list[POICandidate]:
     """Tracked POI candidates (D1 POI / M15 OB / FVG), ranked deterministically.
 
+    `created_after`/`created_before` enforce the causal window between the
+    confirming event and the POI (event-time based, never wall-clock).
     Rejections are preserved with machine-readable reasons (never discarded
     silently). No candidate is manufactured.
     """
@@ -146,6 +148,9 @@ def poi_candidates(view: CausalView, direction: Direction,
             c.rejected_reason = BlockReason.POI_DIRECTION_INVALID.value
         elif created_after is not None and pd.Timestamp(c.created_time) < pd.Timestamp(created_after):
             c.rejected_reason = BlockReason.POI_STRUCTURALLY_INVALID.value
+        elif created_before is not None and pd.Timestamp(c.created_time) > pd.Timestamp(created_before):
+            # POI formed outside the causal window after the confirming event
+            c.rejected_reason = BlockReason.STALE_ANCHOR.value
         elif c.mitigated:
             c.rejected_reason = BlockReason.POI_CONSUMED.value
         elif min_height and (c.high - c.low) < min_height:

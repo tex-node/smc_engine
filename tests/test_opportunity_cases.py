@@ -91,7 +91,7 @@ def test_continuation_stream_requires_post_bos_poi(tmp_path):
     directionally valid POI formed AFTER the BOS."""
     base = _view()
     bos = StructureEvent("BOS-H-TEST", StructureEventType.BOS, Direction.BULLISH,
-                         104.2, 10, pd.Timestamp("2026-01-26 12:00", tz="UTC"))
+                         104.2, 10, pd.Timestamp("2026-01-26 23:00", tz="UTC"))
     view = CausalView(symbol="GBPUSD", as_of=base.as_of, m15_frame=base.m15_frame,
                       m15_last_time=base.m15_last_time, m15_atr=base.m15_atr,
                       breaks=[bos], m15_obs=base.m15_obs, m15_fvgs=base.m15_fvgs,
@@ -103,7 +103,7 @@ def test_continuation_stream_requires_post_bos_poi(tmp_path):
     assert conts, "BOS must open a continuation opportunity"
     c = conts[0]
     assert c.entry_pathway == EntryPathway.CONTINUATION.value
-    assert pd.Timestamp(c.bos_evidence["time"]) == pd.Timestamp("2026-01-26 12:00", tz="UTC")
+    assert pd.Timestamp(c.bos_evidence["time"]) == pd.Timestamp("2026-01-26 23:00", tz="UTC")
     assert c.state in (St.WAITING_FOR_POI.value, St.READY_FOR_MITIGATION.value,
                        St.ENTRY_TRIGGERED.value)
     if c.selected_poi:
@@ -116,7 +116,7 @@ def test_continuation_ttl_independent_of_reversal(tmp_path):
     CONTINUATION opportunity with a zero TTL."""
     base = _view()
     bos = StructureEvent("BOS-H-T2", StructureEventType.BOS, Direction.BULLISH,
-                         104.2, 10, pd.Timestamp("2026-01-26 12:00", tz="UTC"))
+                         104.2, 10, pd.Timestamp("2026-01-26 23:00", tz="UTC"))
     view = CausalView(symbol="GBPUSD", as_of=base.as_of, m15_frame=base.m15_frame,
                       m15_last_time=base.m15_last_time, m15_atr=base.m15_atr,
                       sweeps=base.sweeps, csd_by_sweep=base.csd_by_sweep,
@@ -125,7 +125,7 @@ def test_continuation_ttl_independent_of_reversal(tmp_path):
                       idms=base.idms)
     eng, repo = _engine(tmp_path,
                         windows=OpportunityWindows(continuation_bos_to_poi_bars=0,
-                                                   ready_ttl_bars=96,
+                                                   ready_ttl_bars=192,
                                                    sweep_to_csd_bars=96))
     eng.observe("GBPUSD", view)
     eng.expire_cycle(now=pd.Timestamp(base.as_of) + pd.Timedelta(minutes=1))

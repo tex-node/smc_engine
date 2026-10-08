@@ -95,18 +95,23 @@ class OpportunityEngine:
             opportunity_id=opportunity_id_from_key(key), canonical_key=key,
             symbol=symbol, direction=direction, opportunity_type=otype,
             state=initial_state, created_at=_iso(now), updated_at=_iso(now),
-            expires_at=_iso(pd.Timestamp(now) + pd.Timedelta(
+            # ARMED/WAITING lifetime is anchored to the MARKET EVENT, never to
+            # the wall clock: repeated polling/rehydration must not rejuvenate.
+            expires_at=_iso(pd.Timestamp(anchor_time) + pd.Timedelta(
                 minutes=15 * self.windows.sweep_to_csd_bars)),
             first_seen=_iso(now), last_seen=_iso(now),
+            observed_time=_iso(now),
             entry_pathway=pathway, reason="sweep_armed",
             blocker=BlockReason.WAITING_FOR_CSD.value,
             next_expected="CSD confirmation",
             source_event_ids=[evidence.get("id", "")])
         if otype == Ty.REVERSAL.value:
             opp.sweep_evidence = evidence
+            opp.sweep_time = _iso(anchor_time)
         else:
             opp.bos_evidence = evidence
-            opp.expires_at = _iso(pd.Timestamp(now) + pd.Timedelta(
+            opp.bos_time = _iso(anchor_time)
+            opp.expires_at = _iso(pd.Timestamp(anchor_time) + pd.Timedelta(
                 minutes=15 * self.windows.continuation_bos_to_poi_bars))
         self.repo.upsert(opp)
         self.repo.record_state_change(opp.opportunity_id, St.IDLE.value,
@@ -149,12 +154,18 @@ class OpportunityEngine:
             # post-CSD stage so an opportunity whose components unfolded
             # across time is not lost.
             if csd is not None:
+                # P1-A: the CSD must lie within the sweep->CSD causal window of
+                # the sweep EVENT (event-time based, not observation-time).
+                if (pd.Timestamp(csd.candle_time) - pd.Timestamp(sweep.candle_time)) > \
+                        pd.Timedelta(minutes=15 * self.windows.sweep_to_csd_bars):
+                    continue          # stale CSD for this sweep: never arm
                 opp = self._arm(key, symbol, direction.value, Ty.REVERSAL.value, "SWEEP",
                                 sweep.candle_time, sweep.swept_level, evidence,
                                 self._reversal_pathway(), now, result,
                                 initial_state=St.WAITING_FOR_POI.value)
                 opp.csd_evidence = {"id": csd.id, "direction": csd.direction.value,
                                     "level": float(csd.level), "time": _iso(csd.candle_time)}
+                opp.csd_time = _iso(csd.candle_time)
                 opp.h4_context = csd.id
                 opp.expires_at = _iso(pd.Timestamp(csd.candle_time) + pd.Timedelta(
                     minutes=15 * self.windows.csd_to_poi_bars))
@@ -199,8 +210,45 @@ class OpportunityEngine:
                 logging.getLogger(__name__).exception(
                     "opportunity advance failed for %s", opp.opportunity_id)
 
+    def _stale_anchor_reason(self, opp: Opportunity) -> Optional[str]:
+        """P1-A: causal timing invariant for the persisted chain.
+
+        Evaluated on MARKET-EVENT timestamps only (never observation time):
+          sweep -> CSD within sweep_to_csd_bars
+          CSD   -> POI within csd_to_poi_bars   (continuation: BOS -> POI)
+        """
+        if opp.opportunity_type == Ty.REVERSAL.value:
+            sweep_t = opp.sweep_time or opp.sweep_evidence.get("time")
+            csd_t = opp.csd_time or opp.csd_evidence.get("time")
+            if sweep_t and csd_t:
+                gap = pd.Timestamp(csd_t) - pd.Timestamp(sweep_t)
+                if gap > pd.Timedelta(minutes=15 * self.windows.sweep_to_csd_bars):
+                    return f"CSD {csd_t} beyond sweep->CSD window from {sweep_t}"
+            if csd_t and opp.poi_time:
+                gap = pd.Timestamp(opp.poi_time) - pd.Timestamp(csd_t)
+                if gap > pd.Timedelta(minutes=15 * self.windows.csd_to_poi_bars):
+                    return f"POI {opp.poi_time} beyond CSD->POI window from {csd_t}"
+        else:
+            bos_t = opp.bos_time or opp.bos_evidence.get("time")
+            if bos_t and opp.poi_time:
+                gap = pd.Timestamp(opp.poi_time) - pd.Timestamp(bos_t)
+                if gap > pd.Timedelta(minutes=15 * self.windows.continuation_bos_to_poi_bars):
+                    return f"POI {opp.poi_time} beyond BOS->POI window from {bos_t}"
+        return None
+
     def _advance_one(self, opp: Opportunity, view: evaluator.CausalView,
                      now, result: dict) -> None:
+        # P1-A: a persisted chain that violates the causal windows is terminated
+        # as STALE_ANCHOR (auditable; never silently deleted, never mislabelled
+        # as POI_NOT_FOUND/EXPIRED/RISK_REJECTED/INVALIDATED).
+        violation = self._stale_anchor_reason(opp)
+        if violation:
+            self._terminate(opp, St.INVALIDATED, BlockReason.STALE_ANCHOR.value,
+                            violation, now, result)
+            return
+        # observation metadata advances on every cycle; TTL/expiry do NOT.
+        opp.last_seen = _iso(now)
+        opp.observed_time = _iso(now)
         direction = Direction(opp.direction)
         if opp.opportunity_type == Ty.REVERSAL.value:
             self._advance_reversal(opp, view, direction, now, result)
@@ -242,6 +290,7 @@ class OpportunityEngine:
         if csd is not None and not opp.csd_evidence:
             opp.csd_evidence = {"id": csd.id, "direction": csd.direction.value,
                                 "level": float(csd.level), "time": _iso(csd.candle_time)}
+            opp.csd_time = _iso(csd.candle_time)
             opp.h4_context = csd.id
             opp.expires_at = _iso(pd.Timestamp(csd.candle_time) + pd.Timedelta(
                 minutes=15 * self.windows.csd_to_poi_bars))
@@ -253,17 +302,21 @@ class OpportunityEngine:
 
         # POI discovery (tracked, ranked, rejections preserved)
         if not opp.selected_poi:
+            window_end = (pd.Timestamp(stored_csd_time) + pd.Timedelta(
+                minutes=15 * self.windows.csd_to_poi_bars)) if stored_csd_time else None
             cands = evaluator.poi_candidates(view, direction, self.windows,
-                                             created_after=stored_csd_time)
+                                             created_after=stored_csd_time,
+                                             created_before=window_end)
             opp.poi_candidates = [c.__dict__ for c in cands]
             valid = [c for c in cands if c.rejected_reason is None]
             if not valid:
                 opp.blocker = BlockReason.POI_NOT_FOUND.value
-                opp.next_expected = "qualifying POI (OB/FVG/D1)"
+                opp.next_expected = "qualifying POI (OB/FVG/D1) within CSD window"
                 self.repo.upsert(opp)
                 return
             best = valid[0]
             opp.selected_poi = best.poi_id
+            opp.poi_time = _iso(best.created_time)
             self.repo.upsert(opp)
             self._emit(opp, Ev.POI_FOUND.value, f"POI:{best.poi_id}",
                        f"{opp.symbol} POI selected {best.poi_id} ({best.kind})", result)
@@ -290,6 +343,8 @@ class OpportunityEngine:
                 self.repo.upsert(opp)
                 return
             opp.idm_reference = idm.id
+            opp.idm_time = _iso(getattr(idm, "confirmation_time", None)
+                                or getattr(idm, "candle_time", None) or now)
             self._emit(opp, Ev.IDM_CONFIRMED.value, f"IDM:{idm.id}",
                        f"{opp.symbol} IDM confirmed {idm.id}", result)
 
@@ -319,8 +374,11 @@ class OpportunityEngine:
                               direction: Direction, now, result: dict) -> None:
         bos_time = opp.bos_evidence.get("time")
         if not opp.selected_poi:
+            window_end = (pd.Timestamp(bos_time) + pd.Timedelta(
+                minutes=15 * self.windows.continuation_bos_to_poi_bars)) if bos_time else None
             cands = evaluator.poi_candidates(view, direction, self.windows,
-                                             created_after=bos_time)
+                                             created_after=bos_time,
+                                             created_before=window_end)
             opp.poi_candidates = [c.__dict__ for c in cands]
             valid = [c for c in cands if c.rejected_reason is None]
             if not valid:
@@ -334,6 +392,7 @@ class OpportunityEngine:
                 return
             best = valid[0]
             opp.selected_poi = best.poi_id
+            opp.poi_time = _iso(best.created_time)
             self.repo.upsert(opp)
             self._emit(opp, Ev.POI_FOUND.value, f"POI:{best.poi_id}",
                        f"{opp.symbol} continuation POI {best.poi_id}", result)
@@ -345,9 +404,16 @@ class OpportunityEngine:
             self._transition(opp, St.READY_FOR_MITIGATION,
                              BlockReason.READY_FOR_MITIGATION.value, reason, now, result,
                              event_kind=Ev.READY.value,
-                             evidence_time=(opp.csd_evidence.get("time")
+                             evidence_time=(opp.poi_time
+                                            or opp.csd_evidence.get("time")
                                             or opp.bos_evidence.get("time")))
-            opp.expires_at = _iso(pd.Timestamp(now) + pd.Timedelta(
+            # P1-A: READY lifetime is anchored to the market event that produced
+            # readiness (POI/IDM/CSD/BOS), NOT to the observation time. Repeated
+            # polling or a restart must not rejuvenate an old opportunity.
+            anchor = max(filter(None, [opp.idm_time, opp.poi_time, opp.csd_time,
+                                       opp.bos_time]),
+                         default=pd.Timestamp(now))
+            opp.expires_at = _iso(pd.Timestamp(anchor) + pd.Timedelta(
                 minutes=15 * self.windows.ready_ttl_bars))
         opp.blocker = ""
         opp.next_expected = "POI mitigation / entry"
@@ -377,7 +443,7 @@ class OpportunityEngine:
         if touched:
             self._terminate(opp, St.ENTRY_TRIGGERED, BlockReason.ENTRY_PASSED.value,
                             "entry mitigation reached", now, result,
-                            event_kind=Ev.EXECUTION_READY.value)
+                            event_kind=Ev.ENTRY_TRIGGERED.value)
         else:
             self.repo.upsert(opp)
 
@@ -415,6 +481,18 @@ class OpportunityEngine:
                                              "message": f"opportunity converted to setup {setup.id}",
                                              "symbol": symbol, "state": opp.state})
                     self._diag["alerts_emitted"] += 1
+                # EXECUTION_READY is emitted ONLY now — i.e. only once a real
+                # TradeSetup promotion has occurred (P1-C).
+                if self.repo.record_event_once(opp.opportunity_id,
+                                               Ev.EXECUTION_READY.value,
+                                               f"SETUP:{setup.id}",
+                                               Ev.EXECUTION_READY.value,
+                                               f"{symbol} setup {setup.id} execution-ready"):
+                    result["events"].append({"opportunity_id": opp.opportunity_id,
+                                             "kind": Ev.EXECUTION_READY.value,
+                                             "message": f"setup {setup.id} execution-ready",
+                                             "symbol": symbol, "state": opp.state})
+                    self._diag["alerts_emitted"] += 1
                 break
 
     # ------------------------------------------------------------- termination
@@ -437,6 +515,7 @@ class OpportunityEngine:
         opp.reason = reason
         opp.blocker = reason
         opp.updated_at = _iso(now)
+        opp.observed_time = _iso(now)
         self.repo.upsert(opp)
         self.repo.record_state_change(opp.opportunity_id, previous, state.value,
                                       reason, detail)
@@ -462,6 +541,7 @@ class OpportunityEngine:
         opp.reason = reason
         opp.updated_at = _iso(now)
         opp.last_seen = _iso(now)
+        opp.observed_time = _iso(now)
         self.repo.upsert(opp)
         self.repo.record_state_change(opp.opportunity_id, previous, target.value,
                                       reason, detail)

@@ -46,7 +46,10 @@ STATE_LABEL = {
     OpportunityState.WAITING_FOR_POI: "DEVELOPING",
     OpportunityState.WAITING_FOR_IDM: "DEVELOPING",
     OpportunityState.READY_FOR_MITIGATION: "READY",
-    OpportunityState.ENTRY_TRIGGERED: "EXECUTION READY",
+    # ENTRY_TRIGGERED means ONLY "the configured opportunity entry condition
+    # was encountered". It is NOT execution-ready, NOT risk-approved and NOT a
+    # TradeSetup (P1-C). EXECUTION READY is reserved for setups.
+    OpportunityState.ENTRY_TRIGGERED: "ENTRY CONDITION MET",
     OpportunityState.INVALIDATED: "INVALIDATED",
     OpportunityState.EXPIRED: "EXPIRED",
     OpportunityState.TERMINAL: "EXPIRED",
@@ -94,6 +97,7 @@ class BlockReason(str, Enum):
     TERMINAL_EXISTING = "TERMINAL_EXISTING"
     TERMINAL_HISTORICAL = "TERMINAL_HISTORICAL"
     RISK_BLOCKED = "RISK_BLOCKED"
+    STALE_ANCHOR = "STALE_ANCHOR"
     DUPLICATE = "DUPLICATE"
     EXPIRED_TTL = "EXPIRED_TTL"
 
@@ -104,6 +108,9 @@ class OpportunityEventKind(str, Enum):
     POI_FOUND = "POI_FOUND"
     IDM_CONFIRMED = "IDM_CONFIRMED"
     READY = "READY"
+    # entry-condition met on the opportunity stream (NOT execution-ready).
+    ENTRY_TRIGGERED = "ENTRY_TRIGGERED"
+    # emitted ONLY when a real TradeSetup promotion has occurred.
     EXECUTION_READY = "EXECUTION_READY"
     INVALIDATED = "INVALIDATED"
     EXPIRED = "EXPIRED"
@@ -114,7 +121,7 @@ class OpportunityEventKind(str, Enum):
 class OpportunityWindows:
     """Centralized temporal windows (M15 bars unless noted). Observable in
     diagnostics; no scattered magic timestamps."""
-    sweep_to_csd_bars: int = 24          # sweep -> CSD must confirm within
+    sweep_to_csd_bars: int = 96          # sweep -> CSD must confirm within (24h)
     csd_to_poi_bars: int = 96            # CSD -> qualifying POI discovery
     poi_to_mitigation_bars: int = 96     # POI discovery -> mitigation/entry
     continuation_bos_to_poi_bars: int = 96
@@ -162,6 +169,13 @@ class Opportunity:
     sweep_evidence: dict = field(default_factory=dict)
     csd_evidence: dict = field(default_factory=dict)
     bos_evidence: dict = field(default_factory=dict)
+    # Market-event timestamps (kept separate from wall-clock observation time)
+    sweep_time: object = None
+    csd_time: object = None
+    bos_time: object = None
+    poi_time: object = None
+    idm_time: object = None
+    observed_time: object = None
     poi_candidates: list = field(default_factory=list)   # list[dict]
     selected_poi: str = ""
     idm_reference: str = ""

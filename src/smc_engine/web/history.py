@@ -31,6 +31,8 @@ from typing import Any, Optional
 
 import pandas as pd
 
+from .dbwrite import serialized_write
+
 # engine's own id shape: SETUP-<SYMBOL>-<csd_ns_epoch>-OB-<tf>-<ob_ns_epoch>-<dir>
 # All numeric components are nanoseconds-since-epoch (all-digit strings). (see build_trade_setup)
 CANONICAL_SETUP_ID = re.compile(r"^SETUP-[A-Z][A-Z0-9]*-\d+-OB-[A-Z0-9.\-]+$")
@@ -129,6 +131,7 @@ class SetupEventHistory:
         self._lock = threading.Lock()
 
     # ---------- write ----------
+    @serialized_write
     def observe(self, payload: dict) -> str:
         """Idempotent record. One row per canonical setup_id."""
         reason = canonical_reason(payload)
@@ -177,6 +180,7 @@ class SetupEventHistory:
             self._conn.commit()
             return "updated"
 
+    @serialized_write
     def expire_absent(self, symbol: str, current_ids: set) -> int:
         """Setups no longer produced by the production readiness path.
         Never deletes; appends EXPIRED audit state. current_ids must be the
@@ -205,6 +209,7 @@ class SetupEventHistory:
             self._conn.commit()
             return expired
 
+    @serialized_write
     def record_lifecycle(self, setup_id: str, from_state: str, to_state: str,
                          reason: str) -> None:
         """Observe an existing lifecycle transition (never invents one)."""
@@ -231,6 +236,7 @@ class SetupEventHistory:
                      STATUS_CLOSED, STATUS_EXPIRED))
             self._conn.commit()
 
+    @serialized_write
     def mark_reviewed(self, setup_id: str) -> bool:
         now = _utcnow()
         with self._lock:
@@ -245,6 +251,7 @@ class SetupEventHistory:
             self._conn.commit()
             return cur.rowcount > 0
 
+    @serialized_write
     def mark_paper_execution(self, setup_id: str, outcome: str,
                              requested: bool = True) -> None:
         """Record AFTER-the-fact paper execution observations made by the hub.

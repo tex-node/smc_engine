@@ -43,6 +43,7 @@ from ..structure import (
 )
 from .history import SetupEventHistory, timeframe_from_id
 from .runtime import build_fingerprint, record_startup
+from .dbwrite import run_write, serialized_write, db_write_diagnostics
 from ..opportunity import OpportunityEngine, OpportunityRepository
 from ..opportunity import evaluator as opp_evaluator
 
@@ -344,6 +345,7 @@ class WebStore:
         """)
         self._conn.commit()
 
+    @serialized_write
     def add_hypothesis(self, h: dict) -> str:
         hid = h.get("id") or uuid.uuid4().hex[:10]
         with self._conn:
@@ -360,10 +362,12 @@ class WebStore:
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, r)) for r in cur.fetchall()]
 
+    @serialized_write
     def set_hypothesis_state(self, hid: str, state: str) -> None:
         with self._conn:
             self._conn.execute("UPDATE hypotheses SET state=? WHERE id=?", (state, hid))
 
+    @serialized_write
     def add_alert(self, symbol, timeframe, kind, message, level="INFO") -> None:
         with self._conn:
             self._conn.execute(
@@ -965,8 +969,8 @@ class EngineHub:
             self.registered_ids.add(setup.id)
             self.watch(setup.symbol)
             try:
-                self.store.upsert_setup(setup, LCState.EXECUTION_READY,
-                                        pd.Timestamp.now(tz="UTC"))
+                run_write(lambda: self.store.upsert_setup(
+                    setup, LCState.EXECUTION_READY, pd.Timestamp.now(tz="UTC")))
             except Exception:
                 import logging
                 logging.getLogger(__name__).exception("failed to persist setup %s", setup.id)
@@ -1279,8 +1283,9 @@ class EngineHub:
             self._safe_history(self.event_history.mark_paper_execution, setup_id,
                                f"ORDER_PLACED ticket={ticket}", requested=False)
             try:
-                self.store.upsert_setup(lc.setup, LCState.ORDER_PLACED,
-                                        pd.Timestamp.now(tz="UTC"), ticket=ticket)
+                run_write(lambda: self.store.upsert_setup(
+                    lc.setup, LCState.ORDER_PLACED, pd.Timestamp.now(tz="UTC"),
+                    ticket=ticket))
             except Exception:
                 import logging
                 logging.getLogger(__name__).exception("failed to persist placement %s", setup_id)
@@ -1544,6 +1549,7 @@ class EngineHub:
             "last_scan": dict(self._last_scan),
             "symbols": dict(self._symbol_diag),
             "universe_size": len(self.eligible_symbols()),
+            "db": db_write_diagnostics(),
         })
         return out
 

@@ -15,6 +15,7 @@ from typing import Optional
 import pandas as pd
 
 from .models import Opportunity
+from ..web.dbwrite import serialized_write
 
 
 def _utcnow() -> str:
@@ -68,6 +69,7 @@ class OpportunityRepository:
         self._lock = threading.Lock()
 
     # ---------- write ----------
+    @serialized_write
     def upsert(self, opp: Opportunity) -> None:
         d = asdict(opp)
         with self._lock:
@@ -95,6 +97,7 @@ class OpportunityRepository:
                  json.dumps(d, default=str, sort_keys=True)))
             self._conn.commit()
 
+    @serialized_write
     def record_state_change(self, opportunity_id: str, from_state: str, to_state: str,
                             reason: str, detail: str = "") -> None:
         with self._lock:
@@ -105,6 +108,7 @@ class OpportunityRepository:
                 (opportunity_id, _utcnow(), from_state, to_state, reason, detail))
             self._conn.commit()
 
+    @serialized_write
     def record_event_once(self, opportunity_id: str, transition: str,
                           evidence_key: str, kind: str, message: str) -> bool:
         """True when this (opportunity, transition, evidence) is newly recorded.

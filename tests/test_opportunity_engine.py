@@ -163,7 +163,8 @@ def test_state_machine_transitions():
 
 def test_reversal_opportunity_progresses_across_cycles(tmp_path):
     # the fixture's sweep->CSD gap is ~20h; window configured accordingly
-    eng, repo = _engine(tmp_path, windows=OpportunityWindows(sweep_to_csd_bars=96))
+    eng, repo = _engine(tmp_path, windows=OpportunityWindows(sweep_to_csd_bars=96,
+                                                             ready_ttl_bars=192))
     d1, h4, m15 = timeline()
     sweep_time = None
     states = []
@@ -194,7 +195,10 @@ def test_reversal_opportunity_progresses_across_cycles(tmp_path):
 
 
 def test_entry_touch_terminates_opportunity(tmp_path):
-    eng, repo = _engine(tmp_path, windows=OpportunityWindows(sweep_to_csd_bars=96))
+    # READY TTL is market-anchored; widen it so the (deliberately late) entry
+    # touch in the fixture still falls inside the configured window.
+    eng, repo = _engine(tmp_path, windows=OpportunityWindows(sweep_to_csd_bars=96,
+                                                             ready_ttl_bars=192))
     d1, h4, m15 = timeline(entry_touch=True)
     samples = list(m15["time"].iloc[::8]) + list(m15["time"].iloc[-4:])
     for t in samples:
@@ -207,7 +211,7 @@ def test_entry_touch_terminates_opportunity(tmp_path):
 
 
 def test_ready_persists_across_repeated_polls(tmp_path):
-    eng, repo = _engine(tmp_path)
+    eng, repo = _engine(tmp_path, windows=OpportunityWindows(ready_ttl_bars=192))
     view = _view()
     for _ in range(10):
         eng.observe("GBPUSD", view)
@@ -257,7 +261,8 @@ def test_terminal_historical_setup_does_not_reactivate_opportunity(tmp_path):
 # ------------------------------------------------------------------ pathways
 
 def _run_with_pathways(tmp_path, pathways):
-    eng, repo = _engine(tmp_path, pathways=pathways)
+    eng, repo = _engine(tmp_path, pathways=pathways,
+                        windows=OpportunityWindows(ready_ttl_bars=192))
     eng.observe("GBPUSD", _view())
     return repo.query(symbol="GBPUSD")[0]
 
@@ -348,7 +353,7 @@ def test_replay_deterministic(tmp_path):
 # ---------------------------------------------------------- risk non-destruction
 
 def test_risk_rejection_does_not_destroy_opportunity(tmp_path):
-    eng, repo = _engine(tmp_path)
+    eng, repo = _engine(tmp_path, windows=OpportunityWindows(ready_ttl_bars=192))
     eng.observe("GBPUSD", _view())
     opp = repo.query(symbol="GBPUSD")[0]
     opp.risk_status = "RISK_REJECTED"
@@ -358,7 +363,7 @@ def test_risk_rejection_does_not_destroy_opportunity(tmp_path):
 
 
 def test_portfolio_rejection_does_not_destroy_opportunity(tmp_path):
-    eng, repo = _engine(tmp_path)
+    eng, repo = _engine(tmp_path, windows=OpportunityWindows(ready_ttl_bars=192))
     eng.observe("GBPUSD", _view())
     opp = repo.query(symbol="GBPUSD")[0]
     opp.risk_status = "RISK_PORTFOLIO_REJECTED"
@@ -369,12 +374,14 @@ def test_portfolio_rejection_does_not_destroy_opportunity(tmp_path):
 
 def test_restart_preserves_opportunity_state(tmp_path):
     path = str(tmp_path / "opp.db")
-    eng1 = OpportunityEngine(OpportunityRepository(path), config=CFG)
+    eng1 = OpportunityEngine(OpportunityRepository(path), config=CFG,
+                             windows=OpportunityWindows(ready_ttl_bars=192))
     eng1.observe("GBPUSD", _view())
     before = eng1.repo.query(symbol="GBPUSD")[0]
     assert before.state == St.READY_FOR_MITIGATION.value
     eng1.repo.close()
-    eng2 = OpportunityEngine(OpportunityRepository(path), config=CFG)
+    eng2 = OpportunityEngine(OpportunityRepository(path), config=CFG,
+                             windows=OpportunityWindows(ready_ttl_bars=192))
     after = eng2.repo.query(symbol="GBPUSD")[0]
     assert after.opportunity_id == before.opportunity_id
     assert after.state == before.state
@@ -385,7 +392,7 @@ def test_restart_preserves_opportunity_state(tmp_path):
 
 
 def test_funnel_reports_progression_counts(tmp_path):
-    eng, repo = _engine(tmp_path)
+    eng, repo = _engine(tmp_path, windows=OpportunityWindows(ready_ttl_bars=192))
     eng.observe("GBPUSD", _view())
     f = eng.funnel()
     assert f["ready_opportunity_count"] >= 1
@@ -394,7 +401,7 @@ def test_funnel_reports_progression_counts(tmp_path):
 
 
 def test_audit_explains_current_blocker(tmp_path):
-    eng, repo = _engine(tmp_path)
+    eng, repo = _engine(tmp_path, windows=OpportunityWindows(ready_ttl_bars=192))
     eng.observe("GBPUSD", _view())
     audit = eng.audit("GBPUSD")
     assert audit["classification"] in [b.value for b in BlockReason]
