@@ -167,7 +167,8 @@ class OpportunityRepository:
             sql += " AND opportunity_type=?"
             args.append(opportunity_type)
         if active_only:
-            sql += (" AND state NOT IN ('INVALIDATED','EXPIRED','TERMINAL','ENTRY_TRIGGERED')")
+            sql += (" AND state NOT IN "
+                    "('INVALIDATED','EXPIRED','TERMINAL','ENTRY_TRIGGERED','SUPERSEDED')")
         sql += " ORDER BY updated_at DESC LIMIT ?"
         args.append(int(limit))
         out = []
@@ -186,6 +187,21 @@ class OpportunityRepository:
             (opportunity_id,)).fetchall()
         return [{"at": a, "from": f, "to": t, "reason": r, "detail": d}
                 for a, f, t, r, d in rows]
+
+    @_serialized_read
+    def active_for_instrument(self, symbol_norm: str) -> list[Opportunity]:
+        """All currently active opportunities for a canonical instrument (by norm_symbol)."""
+        sql = ("SELECT payload_json FROM opportunities WHERE symbol_norm=? "
+               "AND state NOT IN "
+               "('INVALIDATED','EXPIRED','TERMINAL','ENTRY_TRIGGERED','SUPERSEDED') "
+               "ORDER BY updated_at DESC LIMIT 200")
+        out = []
+        for (payload,) in self._conn.execute(sql, (symbol_norm,)).fetchall():
+            try:
+                out.append(Opportunity(**json.loads(payload)))
+            except (TypeError, ValueError):
+                continue
+        return out
 
     @_serialized_read
     def state_counts(self) -> dict:

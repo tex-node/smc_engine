@@ -29,13 +29,15 @@ class OpportunityState(str, Enum):
     WAITING_FOR_IDM = "WAITING_FOR_IDM"
     READY_FOR_MITIGATION = "READY_FOR_MITIGATION"
     ENTRY_TRIGGERED = "ENTRY_TRIGGERED"
+    SUPERSEDED = "SUPERSEDED"
     INVALIDATED = "INVALIDATED"
     EXPIRED = "EXPIRED"
     TERMINAL = "TERMINAL"
 
 
 TERMINAL_STATES = {OpportunityState.INVALIDATED, OpportunityState.EXPIRED,
-                   OpportunityState.TERMINAL, OpportunityState.ENTRY_TRIGGERED}
+                   OpportunityState.TERMINAL, OpportunityState.ENTRY_TRIGGERED,
+                   OpportunityState.SUPERSEDED}
 
 # UI-facing buckets (never implies a trade signal)
 STATE_LABEL = {
@@ -50,6 +52,7 @@ STATE_LABEL = {
     # was encountered". It is NOT execution-ready, NOT risk-approved and NOT a
     # TradeSetup (P1-C). EXECUTION READY is reserved for setups.
     OpportunityState.ENTRY_TRIGGERED: "ENTRY CONDITION MET",
+    OpportunityState.SUPERSEDED: "SUPERSEDED",
     OpportunityState.INVALIDATED: "INVALIDATED",
     OpportunityState.EXPIRED: "EXPIRED",
     OpportunityState.TERMINAL: "EXPIRED",
@@ -100,6 +103,8 @@ class BlockReason(str, Enum):
     STALE_ANCHOR = "STALE_ANCHOR"
     DUPLICATE = "DUPLICATE"
     EXPIRED_TTL = "EXPIRED_TTL"
+    SUPERSEDED_THESIS = "SUPERSEDED_THESIS"
+    CONFLICT_REJECTED = "CONFLICT_REJECTED"
 
 
 class OpportunityEventKind(str, Enum):
@@ -115,6 +120,9 @@ class OpportunityEventKind(str, Enum):
     INVALIDATED = "INVALIDATED"
     EXPIRED = "EXPIRED"
     CONVERTED_TO_SETUP = "CONVERTED_TO_SETUP"
+    # emitted when a weaker thesis is superseded by a stronger one for the same
+    # canonical instrument. Distinct from INVALIDATED: causal logic unchanged.
+    OPPORTUNITY_SUPERSEDED = "OPPORTUNITY_SUPERSEDED"
 
 
 @dataclass(frozen=True)
@@ -191,6 +199,10 @@ class Opportunity:
     setup_id: str = ""
     risk_status: str = ""
     state_history: list = field(default_factory=list)     # list[dict]
+    # Supersession (set only when state == SUPERSEDED)
+    superseded_by: str = ""      # canonical_key of the thesis that replaced this one
+    superseded_at: object = None
+    supersession_reason: str = ""
 
     @property
     def active(self) -> bool:

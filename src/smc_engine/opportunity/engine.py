@@ -16,6 +16,7 @@ import pandas as pd
 from ..models import Direction, StructureEventType
 from ..strategy import MultiTimeframeConfig
 from . import evaluator
+from .arbiter import ArbiterDecision, OpportunityArbiter, thesis_strength
 from .models import (TERMINAL_STATES, BlockReason, EntryPathway, Opportunity,
                      OpportunityEventKind as Ev, OpportunityState as St,
                      OpportunityType as Ty, OpportunityWindows,
@@ -48,8 +49,10 @@ class OpportunityEngine:
                                      EntryPathway.SMART.value,
                                      EntryPathway.CONTINUATION.value]
         self.smart_max_distance_atr = 1.5
+        self.arbiter = OpportunityArbiter(repository)
         self._lock = threading.RLock()
         self._last_view: dict = {}
+        self._reconciled = False
         self._diag: dict = {"last_scan_time": None, "opportunities_created": 0,
                             "opportunities_advanced": 0, "alerts_emitted": 0,
                             "alerts_deduplicated": 0}
@@ -59,8 +62,11 @@ class OpportunityEngine:
         """Advance the opportunity state machine for one symbol from one
         authoritative causal view. Idempotent per (view, as_of)."""
         result = {"created": [], "advanced": [], "invalidated": [], "expired": [],
-                  "converted": [], "events": [], "blocked": []}
+                  "converted": [], "events": [], "blocked": [], "superseded": []}
         with self._lock:
+            if not self._reconciled:
+                self._reconcile_startup(result)
+                self._reconciled = True
             self._last_view[symbol] = view
             now = view.m15_last_time or _now()
             self._discover_reversal(symbol, view, now, result)
@@ -159,10 +165,24 @@ class OpportunityEngine:
                 if (pd.Timestamp(csd.candle_time) - pd.Timestamp(sweep.candle_time)) > \
                         pd.Timedelta(minutes=15 * self.windows.sweep_to_csd_bars):
                     continue          # stale CSD for this sweep: never arm
+                initial = St.WAITING_FOR_POI.value
+            else:
+                initial = St.OPPORTUNITY_ARMED.value
+            decision = self.arbiter.arbitrate(
+                symbol, direction.value, initial, int(_ns(sweep.candle_time)))
+            if decision.outcome == "SUPERSEDE":
+                for sid in decision.superseded_ids:
+                    self._supersede_opp(sid, key, decision.reason, now, result)
+            elif decision.outcome == "REJECT":
+                result["blocked"].append(
+                    {"key": key, "reason": decision.reason,
+                     "block": BlockReason.CONFLICT_REJECTED.value})
+                continue
+            if csd is not None:
                 opp = self._arm(key, symbol, direction.value, Ty.REVERSAL.value, "SWEEP",
                                 sweep.candle_time, sweep.swept_level, evidence,
                                 self._reversal_pathway(), now, result,
-                                initial_state=St.WAITING_FOR_POI.value)
+                                initial_state=initial)
                 opp.csd_evidence = {"id": csd.id, "direction": csd.direction.value,
                                     "level": float(csd.level), "time": _iso(csd.candle_time)}
                 opp.csd_time = _iso(csd.candle_time)
@@ -193,6 +213,17 @@ class OpportunityEngine:
             evidence = {"id": bos.id, "type": bos.type.value,
                         "direction": bos.direction.value, "level": float(bos.level),
                         "time": _iso(bos.candle_time)}
+            decision = self.arbiter.arbitrate(
+                symbol, bos.direction.value, St.OPPORTUNITY_ARMED.value,
+                int(_ns(bos.candle_time)))
+            if decision.outcome == "SUPERSEDE":
+                for sid in decision.superseded_ids:
+                    self._supersede_opp(sid, key, decision.reason, now, result)
+            elif decision.outcome == "REJECT":
+                result["blocked"].append(
+                    {"key": key, "reason": decision.reason,
+                     "block": BlockReason.CONFLICT_REJECTED.value})
+                continue
             self._arm(key, symbol, bos.direction.value, Ty.CONTINUATION.value, "BOS",
                       bos.candle_time, bos.level, evidence,
                       EntryPathway.CONTINUATION.value, now, result)
@@ -516,6 +547,45 @@ class OpportunityEngine:
                     self._diag["alerts_emitted"] += 1
                 break
 
+    # ------------------------------------------------------- arbitration helpers
+    def _supersede_opp(self, opp_id: str, winner_key: str, reason: str,
+                       now, result: dict) -> None:
+        """Transition an existing opportunity to SUPERSEDED state."""
+        opp = self.repo.get(opp_id)
+        if opp is None or opp.state == St.SUPERSEDED.value:
+            return
+        try:
+            assert_transition(opp.state, St.SUPERSEDED.value)
+        except Exception:
+            return
+        previous = opp.state
+        opp.state = St.SUPERSEDED.value
+        opp.superseded_by = winner_key
+        opp.superseded_at = _iso(now)
+        opp.supersession_reason = reason
+        opp.reason = BlockReason.SUPERSEDED_THESIS.value
+        opp.blocker = BlockReason.SUPERSEDED_THESIS.value
+        opp.updated_at = _iso(now)
+        self.repo.upsert(opp)
+        self.repo.record_state_change(opp.opportunity_id, previous,
+                                      St.SUPERSEDED.value,
+                                      BlockReason.SUPERSEDED_THESIS.value, reason)
+        self._emit(opp, Ev.OPPORTUNITY_SUPERSEDED.value,
+                   f"superseded:{_ns(now)}",
+                   f"{opp.symbol} {opp.direction} {opp.opportunity_type} superseded by "
+                   f"{winner_key}", result)
+        result["superseded"].append(opp_id)
+        self.arbiter.opportunities_superseded += 1
+
+    def _reconcile_startup(self, result: dict) -> None:
+        """Reconcile pre-existing conflicts from previous sessions."""
+        now = _now()
+        pairs = self.arbiter.reconcile(_iso(now))
+        for loser_id, winner_id in pairs:
+            self._supersede_opp(loser_id, winner_id,
+                                "startup reconciliation — conflict pre-dates this session",
+                                now, result)
+
     # ------------------------------------------------------------- termination
     def _expire_symbol(self, symbol: str, now, result: dict) -> None:
         for opp in self.repo.query(symbol=symbol, active_only=True, limit=1000):
@@ -600,6 +670,7 @@ class OpportunityEngine:
             "execution_ready_count": counts.get(St.ENTRY_TRIGGERED.value, 0),
             "invalidated_count": counts.get(St.INVALIDATED.value, 0),
             "expired_count": counts.get(St.EXPIRED.value, 0),
+            "superseded_count": counts.get(St.SUPERSEDED.value, 0),
             "terminal_count": counts.get(St.TERMINAL.value, 0),
             "converted_to_setup": converted,
             "total": sum(counts.values()),
@@ -610,6 +681,7 @@ class OpportunityEngine:
         d["funnel"] = self.funnel()
         d["windows"] = self.windows.as_dict()
         d["pathways"] = list(self.pathways)
+        d["arbitration"] = self.arbiter.diagnostics()
         return d
 
     def audit(self, symbol: str) -> dict:
