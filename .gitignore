@@ -19,3 +19,7 @@ src/smc_engine.egg-info/
 *_tmp.db-wal
 live_scan*.db*
 SMC MT5Account.txt
+
+# Telegram credentials — never commit
+telegram.txt
+.venv/telegram.txt

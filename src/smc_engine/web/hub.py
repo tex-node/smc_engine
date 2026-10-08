@@ -47,6 +47,7 @@ from .dbwrite import run_write, serialized_read, serialized_write, db_write_diag
 from ..opportunity import OpportunityEngine, OpportunityRepository
 from ..opportunity import evaluator as opp_evaluator
 from ..opportunity.funnel import FunnelRepository
+from ..telegram import TelegramNotifier
 
 TIMEFRAMES = {
     "M1": 1, "M5": 5, "M15": 15, "M30": 30,
@@ -417,6 +418,21 @@ class EngineHub:
         self._symbol_diag: dict[str, dict] = {}
         self._last_scan: dict = {}
         self._last_scan_time: Optional[str] = None
+        # ---------- outbound Telegram notifications ----------
+        _db_dir = os.path.dirname(os.path.abspath(db_path))
+        _repo_root = os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        )
+        _tg_path = ""
+        for _cand in [
+            os.path.join(_db_dir, "telegram.txt"),
+            os.path.join(_repo_root, "telegram.txt"),
+            os.path.join(_repo_root, ".venv", "telegram.txt"),
+        ]:
+            if os.path.isfile(_cand):
+                _tg_path = _cand
+                break
+        self.telegram = TelegramNotifier(_tg_path)
 
     # ---------- account identity gate ----------
     def _account_identity(self) -> dict:
@@ -1495,6 +1511,15 @@ class EngineHub:
             except Exception:
                 import logging
                 logging.getLogger(__name__).exception("opportunity alert dispatch failed")
+            # Telegram notification — best-effort, must not affect the scan cycle.
+            try:
+                opp = None
+                opp_id = ev.get("opportunity_id", "")
+                if opp_id:
+                    opp = self.opportunities.repo.get(opp_id)
+                self.telegram.notify(ev, opp)
+            except Exception:
+                pass
 
     def scan_universe_once(self, force: bool = False) -> dict:
         """One authoritative background cycle.
@@ -1576,6 +1601,7 @@ class EngineHub:
             "universe_size": len(self.eligible_symbols()),
             "db": db_write_diagnostics(),
         })
+        out.update(self.telegram.diagnostics())
         return out
 
     def opportunity_audit(self, symbol: str) -> dict:
