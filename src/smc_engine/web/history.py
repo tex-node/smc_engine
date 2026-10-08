@@ -31,6 +31,7 @@ from typing import Any, Optional
 
 import pandas as pd
 
+from .dbwrite import serialized_read as _serialized_read
 from .dbwrite import serialized_write
 
 # engine's own id shape: SETUP-<SYMBOL>-<csd_ns_epoch>-OB-<tf>-<ob_ns_epoch>-<dir>
@@ -128,7 +129,7 @@ class SetupEventHistory:
           ON setup_events(first_seen_at);
         """)
         self._conn.commit()
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     # ---------- write ----------
     @serialized_write
@@ -277,6 +278,7 @@ class SetupEventHistory:
             self._conn.commit()
 
     # ---------- read ----------
+    @_serialized_read
     def query(self, symbol: Optional[str] = None, timeframe: Optional[str] = None,
               status: Optional[str] = None, setup_id: Optional[str] = None,
               limit: int = 50, before_id: Optional[int] = None) -> dict:
@@ -321,12 +323,14 @@ class SetupEventHistory:
         next_cursor = rows[limit][0] if len(rows) > limit else None
         return {"events": events, "next_cursor": next_cursor}
 
+    @_serialized_read
     def timeline(self, setup_id: str) -> list[dict]:
         rows = self._conn.execute(
             "SELECT at, kind, detail FROM setup_event_timeline WHERE setup_id=? "
             "ORDER BY id ASC", (setup_id,)).fetchall()
         return [{"at": a, "kind": k, "detail": d} for a, k, d in rows]
 
+    @_serialized_read
     def count(self) -> int:
         return self._conn.execute("SELECT COUNT(*) FROM setup_events").fetchone()[0]
 

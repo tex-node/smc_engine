@@ -79,6 +79,41 @@ def test_transient_lock_is_retried_then_succeeds():
     assert after["db_write_count"] == before["db_write_count"] + 1
 
 
+def test_concurrent_reads_and_writes_same_connection(tmp_path):
+    """Live scans interleave repo reads with writes on the same connection,
+    which produced `DatabaseError: another row available`. Reads and writes on
+    one connection must be serialized (connection lock)."""
+    repo = OpportunityRepository(str(tmp_path / "rw.db"))
+    errors = []
+
+    def writer(base):
+        try:
+            for i in range(40):
+                repo.upsert(_opp(base + i))
+        except Exception as exc:                       # noqa: BLE001
+            errors.append(("write", exc))
+
+    def reader():
+        try:
+            for _ in range(80):
+                repo.query(symbol="GBPUSD", active_only=True, limit=50)
+                repo.count()
+                repo.state_counts()
+        except Exception as exc:                       # noqa: BLE001
+            errors.append(("read", exc))
+
+    threads = ([threading.Thread(target=writer, args=(k * 100,)) for k in range(3)] +
+               [threading.Thread(target=reader) for _ in range(3)])
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, f"interleaved access errors: {errors[:3]}"
+    assert repo.count() == 120
+    assert db_write_diagnostics()["db_write_failures"] == 0
+    repo.close()
+
+
 def test_concurrent_opportunity_writes_no_lock_failures(tmp_path):
     repo = OpportunityRepository(str(tmp_path / "c.db"))
     before = db_write_diagnostics()

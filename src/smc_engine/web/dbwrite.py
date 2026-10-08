@@ -98,12 +98,37 @@ def reset_write_diagnostics() -> None:
 
 def serialized_write(method: Callable) -> Callable:
     """Decorate a store write method so its whole body runs under the shared
-    writer lock with bounded retry + observable counters.
+    writer lock (cross-store) AND the store's own connection lock (same
+    connection), with bounded retry + observable counters.
 
     The wrapped methods are idempotent SQL (UPSERT / INSERT OR IGNORE /
     UPDATE), so a retry after a transient lock error is safe.
     """
     @functools.wraps(method)
     def wrapper(self, *args, **kwargs):
-        return run_write(lambda: method(self, *args, **kwargs))
+        def body():
+            lock = getattr(self, "_lock", None)
+            if lock is None:
+                return method(self, *args, **kwargs)
+            with lock:
+                return method(self, *args, **kwargs)
+        return run_write(body)
+    return wrapper
+
+
+def serialized_read(method: Callable) -> Callable:
+    """Serialize reads on the store's own connection only.
+
+    Python's sqlite3 connection is not safe for concurrent statements even
+    with check_same_thread=False; interleaved reads/writes on the same
+    connection produced `DatabaseError: another row available` in live scans.
+    Reads on different connections stay concurrent (no global lock taken).
+    """
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        lock = getattr(self, "_lock", None)
+        if lock is None:
+            return method(self, *args, **kwargs)
+        with lock:
+            return method(self, *args, **kwargs)
     return wrapper

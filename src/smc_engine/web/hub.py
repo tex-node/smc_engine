@@ -43,7 +43,7 @@ from ..structure import (
 )
 from .history import SetupEventHistory, timeframe_from_id
 from .runtime import build_fingerprint, record_startup
-from .dbwrite import run_write, serialized_write, db_write_diagnostics
+from .dbwrite import run_write, serialized_read, serialized_write, db_write_diagnostics
 from ..opportunity import OpportunityEngine, OpportunityRepository
 from ..opportunity import evaluator as opp_evaluator
 
@@ -303,7 +303,7 @@ class DictSource(MarketSource):
 class EventBus:
     def __init__(self, ring_size: int = 300):
         self._subscribers: list[queue.Queue] = []
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self.ring = deque(maxlen=ring_size)
 
     def subscribe(self) -> queue.Queue:
@@ -332,6 +332,7 @@ class WebStore:
 
     def __init__(self, path: str):
         self._path = path
+        self._lock = threading.RLock()
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript("""
@@ -357,6 +358,7 @@ class WebStore:
                  h.get("created_time", pd.Timestamp.now(tz="UTC").isoformat())))
         return hid
 
+    @serialized_read
     def hypotheses(self) -> list[dict]:
         cur = self._conn.execute("SELECT * FROM hypotheses ORDER BY created_time DESC")
         cols = [d[0] for d in cur.description]
@@ -374,6 +376,7 @@ class WebStore:
                 "INSERT INTO alerts(time,symbol,timeframe,kind,message,level) VALUES(?,?,?,?,?,?)",
                 (pd.Timestamp.now(tz="UTC").isoformat(), symbol, timeframe, kind, message, level))
 
+    @serialized_read
     def alerts(self, limit: int = 100) -> list[dict]:
         cur = self._conn.execute(
             "SELECT * FROM alerts ORDER BY id DESC LIMIT ?", (limit,))

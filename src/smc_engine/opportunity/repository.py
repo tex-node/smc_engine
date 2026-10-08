@@ -16,6 +16,7 @@ import pandas as pd
 
 from .models import Opportunity
 from ..web.dbwrite import serialized_write
+from ..web.dbwrite import serialized_read as _serialized_read
 
 
 def _utcnow() -> str:
@@ -66,7 +67,7 @@ class OpportunityRepository:
           ON opportunity_state_history(opportunity_id);
         """)
         self._conn.commit()
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     # ---------- write ----------
     @serialized_write
@@ -136,18 +137,21 @@ class OpportunityRepository:
         except TypeError:
             return None
 
+    @_serialized_read
     def get(self, opportunity_id: str) -> Optional[Opportunity]:
         r = self._conn.execute(
             "SELECT payload_json FROM opportunities WHERE opportunity_id=?",
             (opportunity_id,)).fetchone()
         return self._row_to_opp(r) if r else None
 
+    @_serialized_read
     def get_by_key(self, canonical_key: str) -> Optional[Opportunity]:
         r = self._conn.execute(
             "SELECT payload_json FROM opportunities WHERE canonical_key=?",
             (canonical_key,)).fetchone()
         return self._row_to_opp(r) if r else None
 
+    @_serialized_read
     def query(self, symbol: Optional[str] = None, state: Optional[str] = None,
               opportunity_type: Optional[str] = None, active_only: bool = False,
               limit: int = 200) -> list[Opportunity]:
@@ -174,6 +178,7 @@ class OpportunityRepository:
                 continue
         return out
 
+    @_serialized_read
     def history(self, opportunity_id: str) -> list[dict]:
         rows = self._conn.execute(
             "SELECT at, from_state, to_state, reason, detail FROM "
@@ -182,11 +187,13 @@ class OpportunityRepository:
         return [{"at": a, "from": f, "to": t, "reason": r, "detail": d}
                 for a, f, t, r, d in rows]
 
+    @_serialized_read
     def state_counts(self) -> dict:
         rows = self._conn.execute(
             "SELECT state, COUNT(*) FROM opportunities GROUP BY state").fetchall()
         return {s: n for s, n in rows}
 
+    @_serialized_read
     def count(self) -> int:
         return self._conn.execute("SELECT COUNT(*) FROM opportunities").fetchone()[0]
 
