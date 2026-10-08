@@ -534,7 +534,7 @@ function openStream() {
     }));
   es.addEventListener("ALERT_CREATED", () => loadAlerts());
   ["OPPORTUNITY_CREATED", "OPPORTUNITY_ADVANCED", "POI_FOUND", "IDM_CONFIRMED", "READY",
-   "INVALIDATED", "EXPIRED", "CONVERTED_TO_SETUP"].forEach(k =>
+   "INVALIDATED", "EXPIRED", "CONVERTED_TO_SETUP", "OPPORTUNITY_SUPERSEDED"].forEach(k =>
     es.addEventListener(k, (ev) => {
       try {
         const p = JSON.parse(ev.data).payload || {};

@@ -303,6 +303,17 @@ def test_supersede_opp_emits_event():
     assert Ev.OPPORTUNITY_SUPERSEDED.value in kinds
 
 
+def test_opportunity_superseded_event_kind_matches_sse_listener():
+    """Verify the OPPORTUNITY_SUPERSEDED event kind string is stable.
+
+    The frontend SSE listener (app.js) registers "OPPORTUNITY_SUPERSEDED"
+    as a string literal. If the enum value changes the listener silently
+    stops refreshing after a supersession. This test pins the value so any
+    rename raises here first.
+    """
+    assert Ev.OPPORTUNITY_SUPERSEDED.value == "OPPORTUNITY_SUPERSEDED"
+
+
 def test_supersede_opp_idempotent():
     repo = _repo()
     opp = _opp("CHFJPY", "BEARISH", St.WAITING_FOR_POI.value)
