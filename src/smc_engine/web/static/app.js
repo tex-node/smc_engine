@@ -266,6 +266,8 @@ function renderQuote(a, err) {
     el.innerHTML = head +
       `<span class="q wait">WAITING FOR LIVE TICK</span>` +
       `<span class="q">historical data available — awaiting current quote</span>`;
+  } else if (q.market_data === "REQUEST_FAILED" || q.market_data === "FAILED") {
+    el.innerHTML = head + `<span class="q down">MARKET DATA REQUEST FAILED</span>`;
   } else {
     el.innerHTML = head + `<span class="q down">MARKET DATA UNAVAILABLE</span>`;
   }
@@ -361,6 +363,7 @@ function renderOpportunities(rows, funnel) {
         </div>
         <div class="sig-card-type">${esc(o.type || "")}${o.entry_pathway ? " · " + esc(o.entry_pathway) : ""}</div>
         ${o.blocker ? `<div class="sig-card-blocker">${esc(o.blocker)}</div>` : ""}
+        ${o.risk_checked === false ? `<div class="sig-card-blocker">Risk: NOT CHECKED</div>` : ""}
         <div class="sig-card-age">${_oppAge(o.created_at)}</div>
       </div>`;
     }

@@ -2,12 +2,15 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SMC ENGINE — Trading Workstation</title>
 <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
+
+<!-- ═══════════════════════ HEADER ═══════════════════════ -->
 <header id="topbar">
-  <div class="brand">SMC&nbsp;ENGINE <span class="sub">Varis Methodology Workstation</span></div>
+  <div class="brand">SMC&nbsp;ENGINE <span class="sub">Varis Methodology</span></div>
   <div id="mode-selector">
     <label class="mode-opt" data-mode="ANALYSIS"><input type="radio" name="mode" value="ANALYSIS" checked><span>ANALYSIS</span></label>
     <label class="mode-opt" data-mode="DRY RUN"><input type="radio" name="mode" value="DRY_RUN"><span>DRY RUN</span></label>
@@ -15,84 +18,36 @@
     <label class="mode-opt live-off"><input type="radio" name="mode" value="LIVE" disabled><span>LIVE</span></label>
   </div>
   <div class="status-cluster">
+    <span id="health-chip" class="health-unknown">○ –</span>
     <span id="account-badge" class="badge demo">…</span>
     <span id="conn-badge" class="badge">…</span>
     <span id="clock" class="clock"></span>
+    <button id="sys-btn" class="mini" title="System diagnostics">SYSTEM ▾</button>
   </div>
 </header>
 
-<div id="sys-strip">
-  <span>Engine <b id="s-engine">–</b></span>
-  <span>MT5 <b id="s-mt5">–</b></span>
-  <span>Account <b id="s-acct">–</b></span>
-  <span>Market Data <b id="s-md">–</b></span>
-  <span>Risk Engine <b id="s-risk">–</b></span>
-  <span>Execution <b id="s-exec">–</b></span>
-  <span id="build-chip" title="Source identity · click for full fingerprint" style="cursor:pointer;margin-left:auto;opacity:.7;font-size:10px">BUILD –</span>
-</div>
-
-<div id="unauth-banner" style="display:none;background:#7f1d1d;color:#fca5a5;padding:8px 16px;font-size:12px;font-weight:600;letter-spacing:.05em">
-  <span>ACCOUNT UNAUTHORIZED</span>
-  <span id="unauth-accounts" style="margin-left:12px;font-weight:400"></span>
-  <div id="unauth-instruction" style="font-weight:400;margin-top:3px;font-size:11px;color:#fecaca"></div>
-</div>
-<main id="layout">
-  <aside id="sidebar">
-    <div id="symbol-search-wrap"><input id="symbol-search" placeholder="Filter symbols…"></div>
-    <div id="symbol-list"></div>
-  </aside>
-
-  <section id="center">
-    <div id="chart-toolbar">
-      <div id="tf-buttons"></div>
-      <div id="chart-title"><span id="chart-symbol">—</span> <span id="chart-tf"></span>
-        <span id="chart-price" class="price"></span></div>
-      <div id="overlay-toggles">
-        <label><input type="checkbox" data-layer="swings" checked> swings</label>
-        <label><input type="checkbox" data-layer="events" checked> BOS/CHOCH</label>
-        <label><input type="checkbox" data-layer="sweeps" checked> sweeps</label>
-        <label><input type="checkbox" data-layer="fvgs" checked> FVG</label>
-        <label><input type="checkbox" data-layer="ob" checked> OB</label>
-        <label><input type="checkbox" data-layer="pois" checked> POI</label>
-        <label><input type="checkbox" data-layer="setup" checked> setup</label>
-      </div>
-    </div>
-    <div id="quote-strip"></div>
-    <div id="gateb-strip" class="gateb-waiting">
-      <span class="gb-label">GATE B</span>
-      <span id="gateb-status">WAITING FOR CAUSAL SETUP</span>
-      <span id="gateb-detail">observation only — detection never executes</span>
-      <button id="gateb-review" class="mini hidden">REVIEW SETUP</button>
-    </div>
-    <div id="chart-wrap"><canvas id="chart"></canvas><div id="tooltip" class="hidden"></div></div>
-
-    <div id="panels">
-      <div class="panel" id="setup-panel">
-        <div class="panel-h">SETUP / SIGNAL</div>
-        <div id="setup-body" class="panel-b"><div class="empty">No setup detected by the engine.</div></div>
-      </div>
-      <div class="panel" id="risk-panel">
-        <div class="panel-h">PORTFOLIO RISK</div>
-        <div id="risk-body" class="panel-b"><div class="empty">—</div></div>
-      </div>
-      <div class="panel" id="exec-panel">
-        <div class="panel-h">EXECUTION</div>
-        <div id="exec-body" class="panel-b"><div class="empty">—</div></div>
-      </div>
-      <div class="panel" id="lifecycle-panel">
-        <div class="panel-h">LIFECYCLE</div>
-        <div id="lifecycle-body" class="panel-b"></div>
-      </div>
-    </div>
-  </section>
-
-  <aside id="rightbar">
-    <div class="panel">
-      <div class="panel-h">MARKET OBSERVER</div>
+<!-- ═══════════════════════ SYSTEM DRAWER ═══════════════════════
+     Secondary: account / MT5 / risk / execution / build / market observer / weekly plan
+     Hidden by default; opened with SYSTEM button.                            -->
+<div id="sys-drawer" class="hidden">
+  <div class="sys-row">
+    <span>Engine <b id="s-engine">–</b></span>
+    <span>MT5 <b id="s-mt5">–</b></span>
+    <span>Account <b id="s-acct">–</b></span>
+    <span>Market Data <b id="s-md">–</b></span>
+    <span>Risk Engine <b id="s-risk">–</b></span>
+    <span>Execution <b id="s-exec">–</b></span>
+    <span id="build-chip" title="Source identity · click for full fingerprint" style="cursor:pointer;margin-left:auto;opacity:.7;font-size:10px">BUILD –</span>
+  </div>
+  <div class="sys-secondary">
+    <div class="sys-section">
+      <div class="sys-sec-h">MARKET OBSERVER</div>
       <div id="observer-body" class="panel-b"></div>
     </div>
-    <div class="panel">
-      <div class="panel-h">WEEKLY PLAN <button id="plan-new" class="mini">+ hypothesis</button></div>
+    <div class="sys-section">
+      <div class="sys-sec-h">WEEKLY PLAN
+        <button id="plan-new" class="mini" style="margin-left:6px">+ hypothesis</button>
+      </div>
       <div id="plan-form" class="hidden">
         <div class="grid2">
           <label>Symbol<input id="p-symbol"></label>
@@ -110,36 +65,145 @@
       </div>
       <div id="plan-list" class="panel-b"></div>
     </div>
-    <div class="panel">
-      <div class="panel-h">OPPORTUNITIES <span id="opp-funnel" class="mini" style="border:none"></span></div>
-      <div id="opp-body" class="panel-b feed"></div>
+  </div>
+</div>
+
+<!-- Unauthorized account banner (full-width) -->
+<div id="unauth-banner" style="display:none;background:#7f1d1d;color:#fca5a5;padding:8px 16px;font-size:12px;font-weight:600;letter-spacing:.05em">
+  <span>ACCOUNT UNAUTHORIZED</span>
+  <span id="unauth-accounts" style="margin-left:12px;font-weight:400"></span>
+  <div id="unauth-instruction" style="font-weight:400;margin-top:3px;font-size:11px;color:#fecaca"></div>
+</div>
+
+<!-- ═══════════════════════ MAIN LAYOUT ═══════════════════════ -->
+<main id="layout">
+
+  <!-- WATCHLIST -->
+  <aside id="sidebar">
+    <div id="symbol-search-wrap"><input id="symbol-search" placeholder="Filter symbols…"></div>
+    <div id="symbol-list"></div>
+  </aside>
+
+  <!-- CENTER: chart + context drawer -->
+  <section id="center">
+
+    <div id="chart-toolbar">
+      <div id="tf-buttons"></div>
+      <div id="chart-title">
+        <span id="chart-symbol">—</span>
+        <span id="chart-tf"></span>
+        <span id="chart-price" class="price"></span>
+      </div>
+      <!-- Structure overlay control — collapsible dropdown -->
+      <div class="struct-wrap">
+        <button id="struct-btn" class="mini" title="Chart structure overlays">STRUCTURE ▾</button>
+        <div id="struct-panel" class="hidden">
+          <label><input type="checkbox" data-layer="pois" checked> POI</label>
+          <label><input type="checkbox" data-layer="setup" checked> setup</label>
+          <label><input type="checkbox" data-layer="swings"> swings</label>
+          <label><input type="checkbox" data-layer="events"> BOS/CHOCH</label>
+          <label><input type="checkbox" data-layer="sweeps"> sweeps</label>
+          <label><input type="checkbox" data-layer="fvgs"> FVG</label>
+          <label><input type="checkbox" data-layer="ob"> OB</label>
+        </div>
+      </div>
     </div>
-    <div class="panel">
-      <div class="panel-h">ALERTS</div>
-      <div id="alerts-body" class="panel-b feed"></div>
+
+    <div id="quote-strip"></div>
+
+    <!-- Gate B: compact one-liner -->
+    <div id="gateb-chip" class="gateb-waiting">
+      <span class="gb-dot">○</span>
+      <span id="gateb-status">GATE B · WAITING</span>
+      <span id="gateb-detail" class="gb-sub">observation only — detection never executes</span>
+      <button id="gateb-review" class="mini hidden">REVIEW SETUP ▸</button>
     </div>
-    <div class="panel">
-      <div class="panel-h">CAUSAL SETUP EVENTS</div>
-      <div id="causal-events" class="panel-b feed"></div>
-      <div id="causal-detail" class="panel-b hidden"></div>
+
+    <div id="chart-wrap"><canvas id="chart"></canvas><div id="tooltip" class="hidden"></div></div>
+
+    <!-- CONTEXT DRAWER: setup / risk / execution / lifecycle
+         Hidden by default. Opens when: Gate B ready, opp card clicked, REVIEW pressed. -->
+    <div id="context-drawer" class="hidden">
+      <div id="ctx-header">
+        <div id="ctx-tabs">
+          <button class="ctx-tab active" data-tab="setup">SETUP</button>
+          <button class="ctx-tab" data-tab="risk">RISK</button>
+          <button class="ctx-tab" data-tab="exec">EXECUTION</button>
+          <button class="ctx-tab" data-tab="lifecycle">LIFECYCLE</button>
+        </div>
+        <button id="ctx-close" class="mini">✕</button>
+      </div>
+      <div id="ctx-setup" class="ctx-pane">
+        <div id="setup-body" class="panel-b"><div class="empty">No setup detected by the engine.</div></div>
+      </div>
+      <div id="ctx-risk" class="ctx-pane hidden">
+        <div id="risk-body" class="panel-b"><div class="empty">—</div></div>
+      </div>
+      <div id="ctx-exec" class="ctx-pane hidden">
+        <div id="exec-body" class="panel-b"><div class="empty">—</div></div>
+      </div>
+      <div id="ctx-lifecycle" class="ctx-pane hidden">
+        <div id="lifecycle-body" class="panel-b"></div>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- SIGNALS PANEL: opportunities / alerts / events -->
+  <aside id="rightbar">
+    <div id="signals-panel">
+      <div id="sig-tabs">
+        <button class="sig-tab active" data-sig="opportunities">
+          OPPORTUNITIES <span id="opp-badge" class="tab-badge"></span>
+        </button>
+        <button class="sig-tab" data-sig="alerts">
+          ALERTS <span id="alerts-badge" class="tab-badge"></span>
+        </button>
+        <button class="sig-tab" data-sig="events">EVENTS</button>
+      </div>
+
+      <div id="sig-opportunities" class="sig-pane">
+        <div id="opp-funnel-strip"></div>
+        <div id="opp-body" class="feed"></div>
+      </div>
+
+      <div id="sig-alerts" class="sig-pane hidden">
+        <div id="alerts-body" class="feed"></div>
+      </div>
+
+      <div id="sig-events" class="sig-pane hidden">
+        <div id="causal-events" class="feed"></div>
+        <div id="causal-detail" class="panel-b hidden"></div>
+      </div>
     </div>
   </aside>
+
 </main>
 
-<section id="history">
+<!-- Mobile signals toggle (shown only at narrow widths) -->
+<button id="sig-float-btn" class="hidden" title="Signals">⚡</button>
+
+<!-- ═══════════════════════ SETUP HISTORY ═══════════════════════
+     Secondary — hidden by default, toggled from footer.          -->
+<section id="history" class="hidden">
   <div class="panel-h">SETUP HISTORY
     <span id="hist-filters">
       <select id="f-status"><option value="">All statuses</option></select>
       <select id="f-dir"><option value="">All directions</option><option>BULLISH</option><option>BEARISH</option></select>
       <input id="f-symbol" placeholder="symbol…">
     </span>
+    <button id="hist-close" class="mini" style="margin-left:auto">hide ✕</button>
   </div>
   <table id="hist-table"><thead><tr>
     <th>Time</th><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>R:R</th><th>Risk</th><th>Status</th><th>Ticket</th>
   </tr></thead><tbody></tbody></table>
 </section>
 
-<footer id="foot">LIVE EXECUTION DISABLED · backend enforces account/order gates · engine is the source of truth</footer>
+<footer id="foot">
+  <span>LIVE EXECUTION DISABLED · backend enforces account/order gates · engine is the source of truth</span>
+  <button id="hist-toggle" class="mini" style="margin-left:auto">HISTORY</button>
+</footer>
+
 <script src="/static/app.js"></script>
 </body>
 </html>
