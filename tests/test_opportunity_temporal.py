@@ -153,3 +153,38 @@ def test_temporal_validation_uses_event_time_not_observation_time(tmp_path):
     eng.observe("GBPUSD", _view())              # observed much later
     row = repo.get(opp.opportunity_id)
     assert row.state != St.INVALIDATED.value, "valid chain must not be stale-terminated"
+
+
+def test_legacy_payload_without_poi_time_is_still_audited(tmp_path):
+    """Pre-fix rows carry selected_poi + poi_candidates but a NULL poi_time.
+
+    The causal invariant must still be evaluated from the selected candidate's
+    created_time, otherwise a stale pairing survives termination forever and
+    keeps showing as READY / entry-eligible.
+    """
+    repo = OpportunityRepository(str(tmp_path / "legacy.db"))
+    sweep = pd.Timestamp("2026-01-01 00:00", tz="UTC")
+    csd = pd.Timestamp("2026-01-01 02:00", tz="UTC")
+    stale_poi = pd.Timestamp("2026-01-20 00:00", tz="UTC")     # 19 days after CSD
+    key = canonical_opportunity_key("GBPUSD", "BULLISH", Ty.REVERSAL.value,
+                                    "SWEEP", sweep, 1.0)
+    opp = Opportunity(
+        opportunity_id=opportunity_id_from_key(key), canonical_key=key,
+        symbol="GBPUSD", direction="BULLISH",
+        opportunity_type=Ty.REVERSAL.value, state=St.READY_FOR_MITIGATION.value,
+        created_at=str(sweep), updated_at=str(sweep),
+        sweep_time=str(sweep),
+        sweep_evidence={"id": "SW-X", "time": str(sweep)},
+        csd_evidence={"id": "CSD-X", "time": str(csd)},
+        # legacy shape: market-event timestamp fields are NULL
+        csd_time=None, poi_time=None, selected_poi="OB-M15-LEGACY-BULLISH",
+        poi_candidates=[{"poi_id": "OB-M15-LEGACY-BULLISH", "kind": "OB",
+                         "direction": "BULLISH", "low": 1.0, "high": 1.1,
+                         "created_time": str(stale_poi), "mitigated": False,
+                         "rejected_reason": None}])
+    repo.upsert(opp)
+    eng = OpportunityEngine(repo, config=CFG)
+    eng.observe("GBPUSD", _view())
+    row = repo.get(opp.opportunity_id)
+    assert row.state == St.INVALIDATED.value
+    assert row.reason == BlockReason.STALE_ANCHOR.value

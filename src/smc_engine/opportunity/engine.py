@@ -210,6 +210,25 @@ class OpportunityEngine:
                 logging.getLogger(__name__).exception(
                     "opportunity advance failed for %s", opp.opportunity_id)
 
+    def _poi_anchor_time(self, opp: Opportunity):
+        """Formation time of the selected POI, for causal-window auditing.
+
+        `opp.poi_time` is the canonical source, but rows persisted before the
+        market-event timestamps existed (or any chain whose poi_time was not
+        populated) still carry the selected candidate's `created_time` inside
+        `poi_candidates`. Falling back to it keeps the invariant auditable
+        across restarts and legacy payloads — a stale pairing must never escape
+        termination merely because a convenience field is missing.
+        """
+        if opp.poi_time:
+            return opp.poi_time
+        sel = opp.selected_poi
+        if sel:
+            for c in opp.poi_candidates or []:
+                if c.get("poi_id") == sel and c.get("created_time"):
+                    return c.get("created_time")
+        return None
+
     def _stale_anchor_reason(self, opp: Opportunity) -> Optional[str]:
         """P1-A: causal timing invariant for the persisted chain.
 
@@ -224,16 +243,18 @@ class OpportunityEngine:
                 gap = pd.Timestamp(csd_t) - pd.Timestamp(sweep_t)
                 if gap > pd.Timedelta(minutes=15 * self.windows.sweep_to_csd_bars):
                     return f"CSD {csd_t} beyond sweep->CSD window from {sweep_t}"
-            if csd_t and opp.poi_time:
-                gap = pd.Timestamp(opp.poi_time) - pd.Timestamp(csd_t)
+            poi_t = self._poi_anchor_time(opp)
+            if csd_t and poi_t:
+                gap = pd.Timestamp(poi_t) - pd.Timestamp(csd_t)
                 if gap > pd.Timedelta(minutes=15 * self.windows.csd_to_poi_bars):
-                    return f"POI {opp.poi_time} beyond CSD->POI window from {csd_t}"
+                    return f"POI {poi_t} beyond CSD->POI window from {csd_t}"
         else:
             bos_t = opp.bos_time or opp.bos_evidence.get("time")
-            if bos_t and opp.poi_time:
-                gap = pd.Timestamp(opp.poi_time) - pd.Timestamp(bos_t)
+            poi_t = self._poi_anchor_time(opp)
+            if bos_t and poi_t:
+                gap = pd.Timestamp(poi_t) - pd.Timestamp(bos_t)
                 if gap > pd.Timedelta(minutes=15 * self.windows.continuation_bos_to_poi_bars):
-                    return f"POI {opp.poi_time} beyond BOS->POI window from {bos_t}"
+                    return f"POI {poi_t} beyond BOS->POI window from {bos_t}"
         return None
 
     def _advance_one(self, opp: Opportunity, view: evaluator.CausalView,
