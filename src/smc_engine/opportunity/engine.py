@@ -531,7 +531,8 @@ class OpportunityEngine:
                     result["events"].append({"opportunity_id": opp.opportunity_id,
                                              "kind": Ev.CONVERTED_TO_SETUP.value,
                                              "message": f"opportunity converted to setup {setup.id}",
-                                             "symbol": symbol, "state": opp.state})
+                                             "symbol": symbol, "state": opp.state,
+                                             "event_id": f"SETUP:{setup.id}"})
                     self._diag["alerts_emitted"] += 1
                 # EXECUTION_READY is emitted ONLY now — i.e. only once a real
                 # TradeSetup promotion has occurred (P1-C).
@@ -543,7 +544,8 @@ class OpportunityEngine:
                     result["events"].append({"opportunity_id": opp.opportunity_id,
                                              "kind": Ev.EXECUTION_READY.value,
                                              "message": f"setup {setup.id} execution-ready",
-                                             "symbol": symbol, "state": opp.state})
+                                             "symbol": symbol, "state": opp.state,
+                                             "event_id": f"SETUP:{setup.id}"})
                     self._diag["alerts_emitted"] += 1
                 break
 
@@ -571,7 +573,7 @@ class OpportunityEngine:
                                       St.SUPERSEDED.value,
                                       BlockReason.SUPERSEDED_THESIS.value, reason)
         self._emit(opp, Ev.OPPORTUNITY_SUPERSEDED.value,
-                   f"superseded:{_ns(now)}",
+                   f"superseded:{winner_key}",
                    f"{opp.symbol} {opp.direction} {opp.opportunity_type} superseded by "
                    f"{winner_key}", result)
         result["superseded"].append(opp_id)
@@ -613,7 +615,7 @@ class OpportunityEngine:
         kind = event_kind or (Ev.INVALIDATED.value if state is St.INVALIDATED
                               else Ev.EXPIRED.value if state is St.EXPIRED
                               else Ev.OPPORTUNITY_ADVANCED.value)
-        self._emit(opp, kind, f"{reason}:{_ns(now)}",
+        self._emit(opp, kind, self._event_identity(opp, reason),
                    f"{opp.symbol} {opp.direction} {opp.opportunity_type} -> "
                    f"{state.value} ({reason})", result)
         bucket = ("invalidated" if state is St.INVALIDATED
@@ -637,12 +639,30 @@ class OpportunityEngine:
         self.repo.record_state_change(opp.opportunity_id, previous, target.value,
                                       reason, detail)
         self._emit(opp, event_kind or Ev.OPPORTUNITY_ADVANCED.value,
-                   f"{reason}:{_ns(evidence_time or now)}",
+                   f"{reason}:{_ns(evidence_time or self._event_anchor(opp))}",
                    f"{opp.symbol} {target.value} ({detail})", result)
         result["advanced"].append(opp.opportunity_id)
         self._diag["opportunities_advanced"] += 1
 
     # ------------------------------------------------------------------ events
+    @staticmethod
+    def _event_anchor(opp: Opportunity):
+        """Stable market-event anchor for a logical event (never wall-clock)."""
+        return (opp.poi_time or opp.idm_time or opp.csd_time or opp.bos_time
+                or opp.sweep_time or opp.created_at)
+
+    @classmethod
+    def _event_identity(cls, opp: Opportunity, reason: str) -> str:
+        """Stable logical-event identity.
+
+        Repeated scans must yield the SAME identity for the same logical event
+        so that ``record_event_once`` deduplicates durably across restarts. The
+        identity is derived from the market-event anchor, never the observation
+        clock — otherwise every scan mints a new identity and the same event is
+        recorded (and therefore re-notified) again.
+        """
+        return f"{reason}:{_ns(cls._event_anchor(opp))}"
+
     def _emit(self, opp: Opportunity, kind: str, evidence_key: str, message: str,
               result: dict) -> None:
         """Persist-once event; only genuinely new transitions surface."""
@@ -652,7 +672,8 @@ class OpportunityEngine:
             self._diag["alerts_emitted"] += 1
             result["events"].append({"opportunity_id": opp.opportunity_id,
                                      "kind": kind, "message": message,
-                                     "symbol": opp.symbol, "state": opp.state})
+                                     "symbol": opp.symbol, "state": opp.state,
+                                     "event_id": evidence_key})
         else:
             self._diag["alerts_deduplicated"] += 1
 

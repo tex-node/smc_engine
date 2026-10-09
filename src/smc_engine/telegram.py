@@ -6,7 +6,8 @@ malformed the notifier stays disabled and the scanner continues normally.
 Security guarantees:
 - Credentials are never written to logs, error messages, or API responses.
 - The module is outbound-only: no bot polling, no commands, no trade execution.
-- The queue is bounded; on overflow the oldest enqueued message is dropped.
+- The queue is bounded; on overflow the newest notification is dropped
+  (deterministically, and counted in diagnostics).
 - The background worker is a daemon thread and does not block shutdown.
 """
 from __future__ import annotations
@@ -14,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import queue
+import socket
 import threading
 import time
 import urllib.error
@@ -161,7 +163,14 @@ def _send_telegram_message(token: str, chat_id: str, text: str,
         headers={"Content-Type": "application/json"},
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read())
+        body = resp.read()
+    try:
+        return json.loads(body)
+    except (TypeError, ValueError):
+        # A 2xx response means Telegram ACCEPTED the message. An unparseable
+        # body must NOT be treated as a failure: retrying here would deliver
+        # the same message twice.
+        return {"ok": True, "body_unparsed": True}
 
 
 class TelegramNotifier:
@@ -197,11 +206,17 @@ class TelegramNotifier:
             "telegram_send_count": 0,
             "telegram_failure_count": 0,
             "telegram_deduplicated_count": 0,
+            "telegram_uncertain_count": 0,
+            "telegram_dropped_count": 0,
         }
-        # In-process deduplication guard: (opportunity_id, kind) → already queued.
-        # Cross-restart deduplication is guaranteed by record_event_once() at the
-        # DB layer — result["events"] only contains fresh events.
-        self._sent_keys: set[tuple[str, str]] = set()
+        # Per-symbol scan->delivery counters so a symbol with no eligible event
+        # can be distinguished from a symbol whose event never reached delivery.
+        self._by_symbol: dict[str, dict] = {}
+        # In-process deduplication guard keyed by the STABLE logical-event
+        # identity (opportunity_id, kind, event_id). Cross-restart deduplication
+        # is guaranteed by record_event_once() at the DB layer — result["events"]
+        # only ever contains fresh events with a stable identity.
+        self._sent_keys: set[tuple[str, str, str]] = set()
 
         if cred_path:
             try:
@@ -232,6 +247,11 @@ class TelegramNotifier:
 
         Returns immediately. If the notifier is disabled, the kind is not
         in enabled_kinds, or the queue is full, the call is a no-op.
+
+        Deduplication uses the STABLE logical-event identity
+        (opportunity_id, kind, event_id) so that distinct symbols and distinct
+        lifecycle events never collide, while a repeated scan of the same
+        persisted event is suppressed.
         """
         if not self._enabled:
             return
@@ -240,24 +260,41 @@ class TelegramNotifier:
             return
         symbol = str(event.get("symbol", "?"))
         opp_id = str(event.get("opportunity_id", ""))
-        key = (opp_id, kind)
+        event_id = str(event.get("event_id", ""))
+        key = (opp_id, kind, event_id)
         with self._lock:
             if key in self._sent_keys:
                 self._diag["telegram_deduplicated_count"] += 1
+                self._bump(symbol, "deduplicated")
                 return
             self._sent_keys.add(key)
         text = _format_message(kind, symbol, opp)
+        item = {"symbol": symbol, "kind": kind, "event_id": event_id, "text": text}
         try:
-            self._queue.put_nowait(text)
+            self._queue.put_nowait(item)
+            with self._lock:
+                self._bump(symbol, "queued")
         except queue.Full:
+            with self._lock:
+                self._diag["telegram_dropped_count"] += 1
+                self._bump(symbol, "dropped")
             _log.debug(
                 "Telegram queue full; notification dropped for %s %s", symbol, kind,
             )
 
+    def _bump(self, symbol: str, field: str) -> None:
+        """Increment a per-symbol pipeline counter (caller holds self._lock)."""
+        slot = self._by_symbol.setdefault(
+            symbol, {"queued": 0, "delivered": 0, "failed": 0,
+                     "uncertain": 0, "deduplicated": 0, "dropped": 0})
+        slot[field] = slot.get(field, 0) + 1
+
     def diagnostics(self) -> dict:
         """Return a diagnostics snapshot. Never exposes credentials."""
         with self._lock:
-            return dict(self._diag)
+            d = dict(self._diag)
+            d["telegram_by_symbol"] = {k: dict(v) for k, v in self._by_symbol.items()}
+            return d
 
     def stop(self) -> None:
         """Signal the background worker to stop."""
@@ -270,16 +307,28 @@ class TelegramNotifier:
     def _worker(self) -> None:
         while not self._stop.is_set():
             try:
-                text = self._queue.get(timeout=1.0)
+                item = self._queue.get(timeout=1.0)
             except queue.Empty:
                 continue
             try:
-                self._send_with_retry(text)
+                self._send_with_retry(item)
             finally:
                 self._queue.task_done()
 
-    def _send_with_retry(self, text: str) -> None:
-        """Send one message with rate limiting and bounded exponential backoff."""
+    def _send_with_retry(self, item: dict) -> None:
+        """Send one message with rate limiting and bounded exponential backoff.
+
+        Failure policy (documented):
+          * HTTP 429            -> retried, honouring ``retry_after``.
+          * URLError (DNS/refused) -> definitive pre-delivery failure; retried.
+          * Timeout / other      -> AMBIGUOUS: the request may already have
+            reached Telegram, so it is recorded as ``uncertain`` and NOT retried
+            (preferring at-most-once over a duplicate delivery). Telegram's Bot
+            API offers no idempotency key, so exactly-once cannot be guaranteed
+            across ambiguous network outcomes.
+        """
+        text = item.get("text", "")
+        symbol = item.get("symbol", "?")
         delay = 2.0
         for attempt in range(_MAX_RETRIES + 1):
             # Rate limiting: enforce minimum interval between sends.
@@ -296,6 +345,7 @@ class TelegramNotifier:
                     self._diag["telegram_last_success"] = time.strftime(
                         "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
                     )
+                    self._bump(symbol, "delivered")
                 return
             except urllib.error.HTTPError as exc:
                 if exc.code == 429:
@@ -312,20 +362,39 @@ class TelegramNotifier:
                         time.sleep(retry_after)
                         delay = min(delay * 2, _MAX_RETRY_AFTER_S)
                         continue
-                # Non-429 error or retries exhausted.
-                self._record_failure()
+                # Non-429 HTTP error or retries exhausted.
+                self._record_failure(symbol)
                 return
-            except Exception:
+            except (TimeoutError, socket.timeout):
+                # Ambiguous: do not retry (would risk a duplicate).
+                self._record_uncertain(symbol)
+                return
+            except urllib.error.URLError:
+                # Definitive pre-delivery failure (DNS / connection refused).
                 if attempt < _MAX_RETRIES:
                     time.sleep(delay)
                     delay = min(delay * 2, _MAX_RETRY_AFTER_S)
                     continue
-                self._record_failure()
+                self._record_failure(symbol)
+                return
+            except Exception:
+                # Unknown/ambiguous: do not retry (would risk a duplicate).
+                self._record_uncertain(symbol)
                 return
 
-    def _record_failure(self) -> None:
+    def _record_failure(self, symbol: str = "?") -> None:
         with self._lock:
             self._diag["telegram_failure_count"] += 1
             self._diag["telegram_last_failure"] = time.strftime(
                 "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
             )
+            self._bump(symbol, "failed")
+
+    def _record_uncertain(self, symbol: str = "?") -> None:
+        with self._lock:
+            self._diag["telegram_failure_count"] += 1
+            self._diag["telegram_uncertain_count"] += 1
+            self._diag["telegram_last_failure"] = time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+            )
+            self._bump(symbol, "uncertain")
