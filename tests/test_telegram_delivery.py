@@ -48,6 +48,7 @@ def _make_hub(tmp_path, symbols=SYMS, cut="2026-01-26 01:00"):
     hub = EngineHub(src, db_path=str(tmp_path / "gui.db"),
                     setup_store_path=str(tmp_path / "state.db"))
     hub.stop_poller()
+    hub.telegram._min_send_interval = 0.0     # deterministic: no 1s pacing in tests
     return hub, src
 
 
@@ -250,7 +251,7 @@ def test_definitive_urlerror_retries_bounded(tmp_path, monkeypatch):
 
     def impl(token, chat_id, text, timeout=10.0):
         attempts[0] += 1
-        raise urllib.error.URLError("connection refused")
+        raise urllib.error.URLError(ConnectionRefusedError(10061, "refused"))
 
     n = _notifier(tmp_path, monkeypatch, impl)
     try:
@@ -370,3 +371,166 @@ def test_engine_event_identity_is_stable_across_scans(tmp_path):
         "SELECT COUNT(*) FROM opportunity_events WHERE kind='ENTRY_TRIGGERED'"
     ).fetchone()[0]
     assert n == 1, "advancing scan clock must not mint duplicate event rows"
+
+
+# ── Phase 14D: shared-instance dedup and expired-signal safety ────────────────
+
+def test_two_instances_shared_db_do_not_double_send(tmp_path, sends):
+    """Two application instances on the same DB cannot both notify one event."""
+    hub1, _ = _make_hub(tmp_path, symbols=["GBPUSD"])
+    hub1.scan_universe_once(force=True)
+    _drain(hub1)
+    n1 = len(sends)
+    assert n1 >= 1
+    hub2, _ = _make_hub(tmp_path, symbols=["GBPUSD"])   # fresh instance, same DB
+    hub2.scan_universe_once(force=True)
+    _drain(hub2)
+    assert len(sends) == n1, "shared persistent dedup must prevent a second delivery"
+    hub1.stop_poller()
+    hub2.stop_poller()
+
+
+def test_expired_opportunity_not_notified_as_current(tmp_path, sends):
+    """Re-scanning after expiry must not re-deliver an already-sent notification."""
+    import pandas as pd
+    hub, _ = _make_hub(tmp_path, symbols=["GBPUSD"])
+    for _ in range(3):                       # let the lifecycle reach steady state
+        hub.scan_universe_once(force=True)
+        _drain(hub)
+    before = list(sends)
+    assert before, "fixture must deliver at least one notification"
+    hub.opportunities.expire_cycle(now=pd.Timestamp("2030-01-01", tz="UTC"))
+    _drain(hub)
+    for _ in range(2):
+        hub.scan_universe_once(force=True)
+        _drain(hub)
+    # No logical notification is delivered twice...
+    assert len(sends) == len(set(sends)), "a notification was delivered more than once"
+    # ...and no message sent before expiry recurs afterwards (no stale re-send).
+    for t in before:
+        assert sends.count(t) == 1, "an old/expired signal was re-sent as current"
+    hub.stop_poller()
+
+
+def test_delivered_message_identifies_python_source(tmp_path, monkeypatch):
+    """Every Python-pipeline notification carries a distinguishable source tag.
+
+    A separate sender (an MQL5 EA) shares the same Telegram bot/chat, so the
+    message text must identify its origin.
+    """
+    from src.smc_engine.telegram import _SOURCE_TAG
+    sent = []
+
+    def cap(token, chat_id, text, timeout=10.0):
+        sent.append(text)
+        return {"ok": True}
+
+    (tmp_path / "telegram.txt").write_text('Token="T";\nChatID="1";\n', encoding="utf-8")
+    monkeypatch.setattr(tg_mod, "_send_telegram_message", cap)
+    n = TelegramNotifier(str(tmp_path / "telegram.txt"), min_send_interval=0.0)
+    try:
+        n.notify({"kind": "READY", "symbol": "GBPUSD",
+                  "opportunity_id": "o1", "event_id": "e1"}, None)
+        n._queue.join()
+        assert sent, "a notification must be delivered"
+        assert all(_SOURCE_TAG in t for t in sent), "every message must carry the source tag"
+    finally:
+        n.stop()
+
+
+def test_ambiguous_urlerror_is_not_retried(tmp_path, monkeypatch):
+    """A connection reset after the request may have been sent -> no retry."""
+    import urllib.error
+    attempts = [0]
+
+    def impl(token, chat_id, text, timeout=10.0):
+        attempts[0] += 1
+        raise urllib.error.URLError(ConnectionResetError(10054, "reset"))
+
+    n = _notifier(tmp_path, monkeypatch, impl)
+    try:
+        n.notify({"kind": "READY", "symbol": "GBPUSD",
+                  "opportunity_id": "a", "event_id": "e"}, None)
+        n._queue.join()
+        d = n.diagnostics()
+        assert attempts[0] == 1, "ambiguous reset must not be retried"
+        assert d["telegram_uncertain_count"] == 1
+        assert d["telegram_send_count"] == 0
+    finally:
+        n.stop()
+
+
+def test_event_ref_distinguishes_distinct_events(tmp_path, monkeypatch):
+    """Distinct events get distinct refs; a true duplicate is suppressed."""
+    sent = []
+
+    def cap(token, chat_id, text, timeout=10.0):
+        sent.append(text)
+        return {"ok": True}
+
+    (tmp_path / "telegram.txt").write_text('Token="T";\nChatID="1";\n', encoding="utf-8")
+    monkeypatch.setattr(tg_mod, "_send_telegram_message", cap)
+    n = TelegramNotifier(str(tmp_path / "telegram.txt"), min_send_interval=0.0)
+    try:
+        base = {"kind": "READY", "symbol": "GBPUSD"}
+        n.notify(dict(base, opportunity_id="opp-A", event_id="READY:1"), None)
+        n.notify(dict(base, opportunity_id="opp-B", event_id="READY:1"), None)  # distinct opp
+        n.notify(dict(base, opportunity_id="opp-A", event_id="READY:1"), None)  # true duplicate
+        n._queue.join()
+        assert len(sent) == 2, "distinct events delivered; true duplicate suppressed"
+        assert all("ref " in t for t in sent)
+        assert sent[0].split("ref ")[-1] != sent[1].split("ref ")[-1], \
+            "distinct events must carry distinct refs"
+    finally:
+        n.stop()
+
+
+def test_event_ref_distinguishes_kinds_of_same_opportunity(tmp_path, monkeypatch):
+    """CONVERTED_TO_SETUP and EXECUTION_READY of one setup share event_id but
+    are distinct events, so they must carry distinct refs."""
+    sent = []
+
+    def cap(token, chat_id, text, timeout=10.0):
+        sent.append(text)
+        return {"ok": True}
+
+    (tmp_path / "telegram.txt").write_text('Token="T";\nChatID="1";\n', encoding="utf-8")
+    monkeypatch.setattr(tg_mod, "_send_telegram_message", cap)
+    n = TelegramNotifier(str(tmp_path / "telegram.txt"), min_send_interval=0.0)
+    try:
+        for kind in ("CONVERTED_TO_SETUP", "EXECUTION_READY"):
+            n.notify({"kind": kind, "symbol": "GBPUSD",
+                      "opportunity_id": "opp-Z", "event_id": "SETUP:S1"}, None)
+        n._queue.join()
+        assert len(sent) == 2
+        refs = {t.split("ref ")[-1] for t in sent}
+        assert len(refs) == 2, "same setup, different kind -> distinct refs"
+    finally:
+        n.stop()
+
+
+def test_send_is_logged_with_identity_and_no_secrets(tmp_path, monkeypatch, caplog):
+    import logging
+    sent = []
+
+    def cap(token, chat_id, text, timeout=10.0):
+        sent.append(text)
+        return {"ok": True}
+
+    (tmp_path / "telegram.txt").write_text(
+        'Token="SECRETTOKENXYZ";\nChatID="987654321012";\n', encoding="utf-8")
+    monkeypatch.setattr(tg_mod, "_send_telegram_message", cap)
+    n = TelegramNotifier(str(tmp_path / "telegram.txt"), min_send_interval=0.0)
+    try:
+        with caplog.at_level(logging.INFO, logger="src.smc_engine.telegram"):
+            n.notify({"kind": "READY", "symbol": "GBPUSD",
+                      "opportunity_id": "opp-X", "event_id": "READY:7"}, None)
+            n._queue.join()
+        logs = " ".join(r.getMessage() for r in caplog.records)
+        assert "telegram_send" in logs
+        assert "outcome=delivered" in logs
+        assert "event_id=READY:7" in logs
+        assert "SECRETTOKENXYZ" not in logs, "token must never be logged"
+        assert "987654321012" not in logs, "chat id must never be logged"
+    finally:
+        n.stop()

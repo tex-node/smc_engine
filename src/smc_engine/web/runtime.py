@@ -48,12 +48,30 @@ _MODULE_NAMES = {
 
 # Set once when the first EngineHub is created (call record_startup() from hub.__init__)
 _SERVER_STARTED_AT: Optional[float] = None
+# Revision ACTUALLY loaded by this process, captured at startup. Unlike reading
+# git HEAD at request time, this cannot be changed by later checkouts/pulls, so
+# an obsolete running process can be detected (loaded != current).
+_STARTUP_COMMIT: Optional[str] = None
+_STARTUP_HASHES: dict = {}
 
 
 def record_startup() -> float:
-    """Record process start time. Idempotent — only the first call has effect."""
-    global _SERVER_STARTED_AT
+    """Record process start time and the loaded source revision.
+
+    Idempotent — only the first call has effect. Captures the revision and file
+    hashes at startup so diagnostics can detect an OBSOLETE running process
+    (loaded code != code on disk) instead of reporting the current HEAD.
+    """
+    global _SERVER_STARTED_AT, _STARTUP_COMMIT, _STARTUP_HASHES
     if _SERVER_STARTED_AT is None:
+        try:
+            _STARTUP_COMMIT = git_info()["git_commit"]
+        except Exception:
+            _STARTUP_COMMIT = None
+        try:
+            _STARTUP_HASHES = source_fingerprints()
+        except Exception:
+            _STARTUP_HASHES = {}
         _SERVER_STARTED_AT = time.time()
     return _SERVER_STARTED_AT
 
@@ -132,19 +150,29 @@ def build_fingerprint(pid: Optional[int] = None, account_mode: str = "DEMO",
     disk = source_fingerprints()
     loaded = loaded_module_paths()
 
-    # Detect any mismatch: disk file changed after server started
-    stale: list[str] = []
+    # Detect staleness two ways: (a) mtime after startup (heuristic O/S-level),
+    # and (b) startup hash != current disk hash (definitive for fingerprinted
+    # files). A stale process = code on disk changed since it started.
+    stale: set = set()
     if _SERVER_STARTED_AT:
         for name, rel in FINGERPRINT_FILES.items():
             path = _ENGINE_PKG / rel
             try:
                 if path.stat().st_mtime > _SERVER_STARTED_AT:
-                    stale.append(rel)
+                    stale.add(rel)
             except Exception:
                 pass
+    for name, rel in FINGERPRINT_FILES.items():
+        sh = (_STARTUP_HASHES or {}).get(name)
+        if sh and disk.get(name) != sh:
+            stale.add(rel)
+
+    loaded_commit = _STARTUP_COMMIT
+    stale_code = bool(stale) or (loaded_commit is not None and loaded_commit != gi["git_commit"])
 
     return {
-        "git_commit": gi["git_commit"],
+        "git_commit": gi["git_commit"],              # current on-disk HEAD
+        "loaded_git_commit": loaded_commit,          # revision loaded at startup
         "git_dirty": gi["git_dirty"],
         "modified_files": gi["modified_files"],
         "server_started_at": started_iso,
@@ -152,9 +180,13 @@ def build_fingerprint(pid: Optional[int] = None, account_mode: str = "DEMO",
         "pid": pid if pid is not None else os.getpid(),
         "module_paths": loaded,
         "source_hashes": disk,
-        "files_modified_after_startup": stale,
+        "startup_source_hashes": dict(_STARTUP_HASHES or {}),
+        "files_modified_after_startup": sorted(stale),
+        "stale_code": stale_code,
         "live_execution_enabled": False,
         "account_mode": account_mode,
         "account_login": account_login,
-        "server_version": gi["git_commit"],
+        # server_version = the LOADED revision, so a stale process never reports
+        # the current HEAD as the version it is running.
+        "server_version": loaded_commit or gi["git_commit"],
     }

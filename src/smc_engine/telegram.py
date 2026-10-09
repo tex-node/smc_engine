@@ -12,8 +12,10 @@ Security guarantees:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
 import queue
 import socket
 import threading
@@ -37,6 +39,31 @@ _DEFAULT_ENABLED_KINDS: frozenset[str] = frozenset({
 _MAX_QUEUE_SIZE = 50
 _MIN_SEND_INTERVAL_S = 1.0
 _SEND_TIMEOUT_S = 10.0
+
+# Unambiguous source marker appended to every message this Python pipeline
+# sends. A different, independent sender (e.g. an MQL5 EA) may share the same
+# Telegram bot and chat, so the message text must identify its origin. This is
+# purely informational; it changes no delivery behaviour.
+_SOURCE_TAG = "source: smc_engine (python pipeline)"
+
+
+def _event_ref(opp_id: str, kind: str, event_id: str) -> str:
+    """Short, stable reference that uniquely identifies a logical event.
+
+    Mirrors the notifier's deduplication identity ``(opportunity_id, kind,
+    event_id)`` so the ref is identical for a true re-delivery and distinct for
+    any different legitimate event — including two kinds of the same
+    opportunity (e.g. CONVERTED_TO_SETUP vs EXECUTION_READY, which share an
+    ``event_id``). It is a hash prefix — no private data is revealed.
+    """
+    if not opp_id and not kind and not event_id:
+        return "-"
+    return hashlib.sha256(f"{opp_id}|{kind}|{event_id}".encode("utf-8")).hexdigest()[:10]
+
+
+def _message_fingerprint(text: str) -> str:
+    """Short fingerprint of the exact outbound text (for logs; secret-safe)."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:10]
 _MAX_RETRY_AFTER_S = 60.0
 _MAX_RETRIES = 2
 
@@ -268,8 +295,11 @@ class TelegramNotifier:
                 self._bump(symbol, "deduplicated")
                 return
             self._sent_keys.add(key)
-        text = _format_message(kind, symbol, opp)
-        item = {"symbol": symbol, "kind": kind, "event_id": event_id, "text": text}
+        ref = _event_ref(opp_id, kind, event_id)
+        text = (_format_message(kind, symbol, opp)
+                + f"\n\n\u2014 {_SOURCE_TAG} \u00b7 ref {ref}")
+        item = {"symbol": symbol, "kind": kind, "event_id": event_id,
+                "opp_id": opp_id, "ref": ref, "text": text}
         try:
             self._queue.put_nowait(item)
             with self._lock:
@@ -315,17 +345,27 @@ class TelegramNotifier:
             finally:
                 self._queue.task_done()
 
+    def _log_send(self, item: dict, outcome: str, attempt: int = 0) -> None:
+        """Secret-safe structured log line for every send attempt/outcome."""
+        _log.info(
+            "telegram_send pid=%s ref=%s fp=%s symbol=%s kind=%s event_id=%s "
+            "outcome=%s attempt=%s",
+            os.getpid(), item.get("ref", "-"),
+            _message_fingerprint(item.get("text", "")),
+            item.get("symbol", "?"), item.get("kind", ""),
+            item.get("event_id", ""), outcome, attempt,
+        )
+
     def _send_with_retry(self, item: dict) -> None:
         """Send one message with rate limiting and bounded exponential backoff.
 
         Failure policy (documented):
-          * HTTP 429            -> retried, honouring ``retry_after``.
-          * URLError (DNS/refused) -> definitive pre-delivery failure; retried.
-          * Timeout / other      -> AMBIGUOUS: the request may already have
+          * HTTP 429                -> retried, honouring ``retry_after``.
+          * URLError DNS / refused  -> DEFINITIVE pre-delivery failure; retried.
+          * Timeout / reset / other -> AMBIGUOUS: the request may already have
             reached Telegram, so it is recorded as ``uncertain`` and NOT retried
-            (preferring at-most-once over a duplicate delivery). Telegram's Bot
-            API offers no idempotency key, so exactly-once cannot be guaranteed
-            across ambiguous network outcomes.
+            (at-most-once). Telegram's Bot API offers no idempotency key, so
+            exactly-once cannot be guaranteed across ambiguous outcomes.
         """
         text = item.get("text", "")
         symbol = item.get("symbol", "?")
@@ -337,6 +377,7 @@ class TelegramNotifier:
             if elapsed < self._min_send_interval:
                 time.sleep(self._min_send_interval - elapsed)
 
+            self._log_send(item, "attempt", attempt)
             try:
                 _send_telegram_message(self._token, self._chat_id, text)
                 self._last_send_time = time.monotonic()
@@ -346,6 +387,7 @@ class TelegramNotifier:
                         "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
                     )
                     self._bump(symbol, "delivered")
+                self._log_send(item, "delivered", attempt)
                 return
             except urllib.error.HTTPError as exc:
                 if exc.code == 429:
@@ -359,27 +401,37 @@ class TelegramNotifier:
                     except Exception:
                         pass
                     if attempt < _MAX_RETRIES:
+                        self._log_send(item, "retrying(429)", attempt)
                         time.sleep(retry_after)
                         delay = min(delay * 2, _MAX_RETRY_AFTER_S)
                         continue
                 # Non-429 HTTP error or retries exhausted.
                 self._record_failure(symbol)
+                self._log_send(item, f"failed(http {exc.code})", attempt)
                 return
             except (TimeoutError, socket.timeout):
                 # Ambiguous: do not retry (would risk a duplicate).
                 self._record_uncertain(symbol)
+                self._log_send(item, "uncertain(timeout)", attempt)
                 return
-            except urllib.error.URLError:
-                # Definitive pre-delivery failure (DNS / connection refused).
-                if attempt < _MAX_RETRIES:
+            except urllib.error.URLError as exc:
+                reason = getattr(exc, "reason", None)
+                definitive = isinstance(reason, (socket.gaierror, ConnectionRefusedError))
+                if definitive and attempt < _MAX_RETRIES:
+                    # Pre-delivery failure: nothing was sent; safe to retry.
+                    self._log_send(item, "retrying(pre-delivery)", attempt)
                     time.sleep(delay)
                     delay = min(delay * 2, _MAX_RETRY_AFTER_S)
                     continue
-                self._record_failure(symbol)
+                # Ambiguous (e.g. connection reset after the request may have
+                # been sent) or retries exhausted: do NOT retry (at-most-once).
+                self._record_uncertain(symbol)
+                self._log_send(item, "uncertain(urlerror)", attempt)
                 return
             except Exception:
                 # Unknown/ambiguous: do not retry (would risk a duplicate).
                 self._record_uncertain(symbol)
+                self._log_send(item, "uncertain(error)", attempt)
                 return
 
     def _record_failure(self, symbol: str = "?") -> None:
