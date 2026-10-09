@@ -176,7 +176,8 @@ def test_visibilitychange_refresh_present_and_immediate():
 def test_stale_response_protection_in_loadAnalysis():
     js = Path("src/smc_engine/web/static/app.js").read_text(encoding="utf-8")
     assert "analysisSeq" in js
-    assert "if (my !== analysisSeq) return;" in js
+    # guard now also rejects a response whose symbol/symbolSeq changed mid-flight
+    assert re.search(r"if \(my !== analysisSeq", js)
 
 
 def test_frontend_renders_all_four_states_distinctly():

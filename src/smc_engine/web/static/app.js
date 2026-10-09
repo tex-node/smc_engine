@@ -9,6 +9,18 @@ const S = {
   risk: { state: "NONE", reason: "" },
   symStates: {},   // symbol → { label, direction } from latest opportunities response
   ctxOpen: false,  // context drawer visibility
+  // ── UI context separation ──────────────────────────────────────────────
+  // symbolSeq increments on every explicit chart-symbol/timeframe change so
+  // delayed responses for a previous context can be discarded instead of
+  // overwriting the newer selection.
+  symbolSeq: 0,
+  // The symbol/timeframe the currently-drawn S.analysis actually describes.
+  // The chart is ALWAYS labelled from this, never from the (possibly newer)
+  // selection, so the header can never disagree with the drawn candles.
+  chartState: "loading",   // loading | ready | empty | unavailable
+  // Opportunity context: the persisted opportunity the user is inspecting,
+  // independent from the chart context. null = chart context.
+  selectedOpp: null,
 };
 const $ = (q) => document.querySelector(q);
 const $$ = (q) => document.querySelectorAll(q);
@@ -36,6 +48,7 @@ function openContextDrawer(tab = "setup") {
   drawer.classList.remove("hidden");
   S.ctxOpen = true;
   switchCtxTab(tab);
+  renderContext();
 }
 function closeContextDrawer() {
   const drawer = $("#context-drawer");
@@ -109,7 +122,7 @@ function wire() {
   /* TF buttons — use event delegation so rebuilt buttons still work */
   $("#tf-buttons").addEventListener("click", (e) => {
     const b = e.target.closest("[data-tf]");
-    if (b) { S.tf = b.dataset.tf; buildTfButtons(); refresh(); }
+    if (b) { selectTimeframe(b.dataset.tf); }
   });
 
   /* Structure overlay toggles — initialise layers from checked state */
@@ -203,21 +216,25 @@ async function refresh() {
 let analysisSeq = 0;
 async function loadAnalysis(quiet) {
   const my = ++analysisSeq;
-  const sym = S.symbol, tf = S.tf;
+  const sym = S.symbol, tf = S.tf, seq = S.symbolSeq;
+  if (!quiet) { S.chartState = "loading"; drawChart(); }
   try {
     const a = await api(`/api/analysis/${sym}/${tf}?count=250`);
-    if (my !== analysisSeq) return;
+    if (my !== analysisSeq || seq !== S.symbolSeq) return;   // stale response
     S.analysis = a;
+    S.chartState = (a.candles && a.candles.length) ? "ready" : "empty";
     S.prices[sym] = a.last_closed_close;
-    drawChart(); renderQuote();
+    drawChart(); renderQuote(a); renderContext();
     await renderRisk();
     renderSetup(); renderLifecycle();
   } catch (e) {
-    if (my !== analysisSeq) return;
+    if (my !== analysisSeq || seq !== S.symbolSeq) return;   // stale failure
     S.analysis = null;
+    S.chartState = "unavailable";
     S.risk = { state: "UNAVAILABLE", reason: e.message };
+    clearPriceTag();                                          // no stale live price
     renderQuote(null, e.message);
-    renderSetup(); renderLifecycle(); drawChart();
+    renderSetup(); renderLifecycle(); drawChart(); renderContext();
   }
 }
 
@@ -243,7 +260,7 @@ function identityChip(id) {
          `<span class="chip ${cls}">${esc(id.account_class || "?")}</span></span>`;
 }
 
-function renderQuote(a, err) {
+function renderQuote(a = S.analysis, err) {
   const el = $("#quote-strip");
   if (!el) return;
   if (!a) {
@@ -274,10 +291,16 @@ function renderQuote(a, err) {
 }
 
 async function loadSetups() {
+  const seq = S.symbolSeq, sym = S.symbol;
   try {
-    const url = `/api/setups?symbol=${encodeURIComponent(S.symbol)}`;
-    S.setups = (await api(url)).setups || [];
-  } catch (e) { S.setups = []; }
+    const url = `/api/setups?symbol=${encodeURIComponent(sym)}`;
+    const rows = (await api(url)).setups || [];
+    if (seq !== S.symbolSeq) return;      // discard a stale-symbol response
+    S.setups = rows;
+  } catch (e) {
+    if (seq !== S.symbolSeq) return;
+    S.setups = [];
+  }
   if (S.selected && !S.setups.find(s => s.setup_id === S.selected)) S.selected = null;
   renderLifecycle(); renderSetup();
 }
@@ -355,7 +378,7 @@ function renderOpportunities(rows, funnel) {
     html += `<div class="sig-group-h">${gLabel} · ${gRows.length}</div>`;
     for (const o of gRows) {
       const bull = o.direction === "BULLISH";
-      html += `<div class="sig-card ${esc(o.label)}" data-sym="${esc(o.symbol)}">
+      html += `<div class="sig-card ${esc(o.label)}" data-sym="${esc(o.symbol)}" data-opp="${esc(o.opportunity_id || "")}">
         <div class="sig-card-head">
           <span class="sig-card-sym">${esc(o.symbol)}</span>
           <span class="sig-card-dir ${bull ? "bull" : "bear"}">${bull ? "▲ LONG" : "▼ SHORT"}</span>
@@ -370,12 +393,10 @@ function renderOpportunities(rows, funnel) {
   }
   box.innerHTML = html;
 
-  box.querySelectorAll("[data-sym]").forEach(el =>
+  box.querySelectorAll("[data-opp]").forEach(el =>
     el.onclick = () => {
-      S.symbol = el.dataset.sym;
-      const ps = $("#p-symbol"); if (ps) ps.value = S.symbol;
-      buildSymbolList(); refresh();
-      openContextDrawer("setup");
+      const o = rows.find(r => r.opportunity_id === el.dataset.opp);
+      if (o) selectOpportunity(o); else selectChartSymbol(el.dataset.sym);
       /* Close mobile rightbar overlay after selection */
       const rb = $("#rightbar"); if (rb) rb.classList.remove("open");
     });
@@ -386,13 +407,16 @@ let _lastGateBStatus = null;
 let readinessPrimed = false;
 
 async function loadReadiness() {
+  const seq = S.symbolSeq, sym = S.symbol;
   try {
-    const r = await api(`/api/readiness${S.symbol ? "?symbol=" + encodeURIComponent(S.symbol) : ""}`);
+    const r = await api(`/api/readiness${sym ? "?symbol=" + encodeURIComponent(sym) : ""}`);
+    if (seq !== S.symbolSeq) return;      // discard a stale-symbol response
     S.readiness = r;
     renderReadiness(r);
     const first = !readinessPrimed; readinessPrimed = true;
     for (const id of (r.detected_ids || [])) maybeNotifySetup(id, first);
   } catch (e) {
+    if (seq !== S.symbolSeq) return;
     renderReadiness({ status: "READINESS UNAVAILABLE (read-only layer)", setup: null, detected_ids: [] });
   }
 }
@@ -448,10 +472,12 @@ function reviewSetup(id) {
 
 /* ── Causal setup event history ──────────────────────────────────────────── */
 async function loadCausalEvents() {
+  const seq = S.symbolSeq;
   try {
     const r = await api(`/api/setup-history?symbol=${encodeURIComponent(S.symbol)}&limit=25`);
+    if (seq !== S.symbolSeq) return;      // discard a stale-symbol response
     renderCausalEvents(r.events || []);
-  } catch (e) { renderCausalEvents(null, e.message); }
+  } catch (e) { if (seq === S.symbolSeq) renderCausalEvents(null, e.message); }
 }
 
 function renderCausalEvents(events, err) {
@@ -619,6 +645,105 @@ function updatePriceTag(p) {
   el.className = "price " + (p >= prev ? "up" : "down");
 }
 
+/* Clear the live price tag so a stale quote is never shown as live. */
+function clearPriceTag() {
+  const el = $("#chart-price"); if (!el) return;
+  el.textContent = "—"; el.dataset.v = ""; el.className = "price";
+}
+
+/* ── Context selection (chart vs opportunity) ────────────────────────────────
+   Chart context = instrument + timeframe + its own market data and causal
+   setup. Opportunity context = a specific persisted opportunity the user is
+   inspecting. They are separate; changing the chart context clears the
+   opportunity selection, and selecting an opportunity does not fabricate a
+   causal setup. */
+function selectChartSymbol(sym) {
+  if (!sym || sym === S.symbol) return;
+  S.symbol = sym;
+  S.symbolSeq++;
+  S.selectedOpp = null;              // chart change → chart context
+  S.analysis = null;                 // drop stale data (never mislabel)
+  S.chartState = "loading";
+  const ps = $("#p-symbol"); if (ps) ps.value = sym;
+  clearPriceTag();
+  buildSymbolList();
+  refresh();
+}
+function selectTimeframe(tf) {
+  if (!tf || tf === S.tf) return;
+  S.tf = tf;
+  S.symbolSeq++;
+  S.selectedOpp = null;
+  S.analysis = null;
+  S.chartState = "loading";
+  clearPriceTag();
+  buildTfButtons();
+  refresh();
+}
+function selectOpportunity(opp) {
+  if (!opp) return;
+  // Selecting an opportunity inspects it; the chart may follow its symbol so
+  // the two contexts agree, but the drawer shows the OPPORTUNITY's own data.
+  if (opp.symbol && opp.symbol !== S.symbol) {
+    S.symbol = opp.symbol; S.symbolSeq++;
+    S.analysis = null; S.chartState = "loading"; clearPriceTag();
+    const ps = $("#p-symbol"); if (ps) ps.value = opp.symbol;
+    buildSymbolList();
+  }
+  S.selectedOpp = {
+    opportunity_id: opp.opportunity_id, symbol: opp.symbol,
+    direction: opp.direction, type: opp.type, state: opp.state,
+    label: opp.label, created_at: opp.created_at, updated_at: opp.updated_at,
+    blocker: opp.blocker, next_expected: opp.next_expected, reason: opp.reason,
+    setup_id: opp.setup_id, risk_status: opp.risk_status,
+    selected_poi: opp.selected_poi, entry_pathway: opp.entry_pathway,
+    detail: null, error: null,
+  };
+  openContextDrawer("setup");
+  renderSetup();
+  loadOpportunityDetail(opp.opportunity_id);
+  refresh();
+}
+function clearOpportunitySelection() {
+  if (!S.selectedOpp) return;
+  S.selectedOpp = null;
+  renderSetup();
+  renderContext();
+}
+async function loadOpportunityDetail(id) {
+  if (!S.selectedOpp || S.selectedOpp.opportunity_id !== id) return;
+  try {
+    const r = await api(`/api/opportunities/${encodeURIComponent(id)}`);
+    if (!S.selectedOpp || S.selectedOpp.opportunity_id !== id) return;
+    S.selectedOpp.detail = r.history || [];
+    S.selectedOpp.full = r.opportunity || null;
+    S.selectedOpp.audit = r.audit || null;
+    S.selectedOpp.error = null;
+  } catch (e) {
+    if (!S.selectedOpp || S.selectedOpp.opportunity_id !== id) return;
+    S.selectedOpp.error = e.message;
+  }
+  renderSetup();
+}
+
+/* Context banner: tells the user which context the drawer describes. */
+function renderContext() {
+  const el = $("#ctx-context"); if (!el) return;
+  const o = S.selectedOpp;
+  if (o) {
+    el.className = "ctx-context opp";
+    el.innerHTML = `<span class="ctx-kind">OPPORTUNITY CONTEXT</span>
+      <span class="ctx-id">${esc(o.symbol)} ${o.direction === "BULLISH" ? "▲ LONG" : "▼ SHORT"} · ${esc(o.type || "")}</span>
+      <span class="chip ${esc(o.label || "")}">${esc(o.label || o.state || "")}</span>
+      <span class="ctx-note">chart: ${esc(S.symbol)} · ${esc(S.tf)}</span>`;
+  } else {
+    el.className = "ctx-context chart";
+    el.innerHTML = `<span class="ctx-kind">CHART CONTEXT</span>
+      <span class="ctx-id">${esc(S.symbol || "—")} · ${esc(S.tf)}</span>
+      <span class="ctx-note">causal setup for the displayed instrument</span>`;
+  }
+}
+
 /* ── Symbol watchlist ────────────────────────────────────────────────────── */
 function buildSymbolList(filter = "") {
   const box = $("#symbol-list"); if (!box) return; box.innerHTML = "";
@@ -639,7 +764,7 @@ function buildSymbolList(filter = "") {
       `<span class="sym-state-col">` +
       (dir ? `<span class="sym-dir-glyph ${dirCls}">${dir}</span>` : "") +
       `<span class="${dotCls}">${dot}</span></span>`;
-    d.onclick = () => { S.symbol = sym; const ps = $("#p-symbol"); if (ps) ps.value = sym; buildSymbolList(filter); refresh(); };
+    d.onclick = () => { selectChartSymbol(sym); buildSymbolList(filter); };
     box.appendChild(d);
   }
 }
@@ -659,11 +784,24 @@ function drawChart() {
   const W = cv.clientWidth, H = cv.clientHeight, DPR = devicePixelRatio || 1;
   cv.width = W * DPR; cv.height = H * DPR; cx.setTransform(DPR, 0, 0, DPR, 0, 0);
   cx.clearRect(0, 0, W, H);
-  $("#chart-symbol").textContent = S.symbol + (a ? "" : " — no data");
-  $("#chart-tf").textContent = a ? "· " + a.timeframe : "";
+  // The chart is ALWAYS labelled from the data it actually draws, so the header
+  // can never disagree with the candles. When data is absent the label reflects
+  // the current SELECTION plus an explicit state (loading/unavailable/empty).
+  $("#chart-symbol").textContent = (a ? a.symbol : S.symbol) || "—";
+  if (a) {
+    $("#chart-tf").textContent = "· " + a.timeframe +
+      (a.symbol !== S.symbol || a.timeframe !== S.tf
+        ? ` (loading ${S.symbol} ${S.tf}…)` : "");
+  } else {
+    $("#chart-tf").textContent = "· " + S.tf;
+  }
   if (!a || !a.candles || !a.candles.length) {
     cx.fillStyle = "#46506a"; cx.font = "13px monospace";
-    cx.fillText(a ? "not enough candles" : "MT5 DISCONNECTED — analysis unavailable", 20, 30);
+    const msg = S.chartState === "loading" ? `LOADING ${S.symbol} ${S.tf}…`
+              : S.chartState === "unavailable" ? "MT5 DISCONNECTED — analysis unavailable"
+              : S.chartState === "empty" ? "not enough candles"
+              : "no data";
+    cx.fillText(msg, 20, 30);
     return;
   }
   updatePriceTag(a.last_closed_close);
@@ -789,15 +927,56 @@ function setupModel() {
   return { cand: c, row };
 }
 
+/* Opportunity context: render the SELECTED opportunity's own identity and
+   lifecycle. Never presents the opportunity as a causal setup. */
+function renderOpportunityContext(box) {
+  const o = S.selectedOpp;
+  const bull = o.direction === "BULLISH";
+  const det = o.detail || [];
+  const hist = det.map(h => `<div class="a-t">${esc((h.at || "").slice(11, 19))}Z · ${esc(h.to || h.from || "")}${h.reason ? " · " + esc(h.reason) : ""}</div>`).join("");
+  const isSetup = !!o.setup_id;
+  box.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <b>${esc(o.symbol)} ${bull ? "▲ LONG" : "▼ SHORT"} · ${esc(o.type || "")}</b>
+      <span class="chip ${esc(o.label || "")}">${esc(o.label || o.state || "")}</span>
+    </div>
+    <div class="kv"><span class="k">Opportunity</span><span class="v" style="word-break:break-all;font-size:10px">${esc(o.opportunity_id)}</span></div>
+    <div class="kv"><span class="k">State</span><span class="v">${esc(o.state || "—")}</span></div>
+    <div class="kv"><span class="k">Pathway</span><span class="v">${esc(o.entry_pathway || "—")}</span></div>
+    <div class="kv"><span class="k">POI</span><span class="v" style="word-break:break-all;font-size:10px">${esc(o.selected_poi || "—")}</span></div>
+    <div class="kv"><span class="k">Blocker</span><span class="v">${esc(o.blocker || "—")}</span></div>
+    <div class="kv"><span class="k">Next</span><span class="v">${esc(o.next_expected || "—")}</span></div>
+    <div class="kv"><span class="k">Risk</span><span class="v">${esc(o.risk_status || "NOT CHECKED")}</span></div>
+    <div class="kv"><span class="k">Setup</span><span class="v">${esc(o.setup_id || "none")}</span></div>
+    <div class="kv"><span class="k">Created</span><span class="v">${esc((o.created_at || "").slice(0, 19))}</span></div>
+    <div class="kv"><span class="k">Updated</span><span class="v">${esc((o.updated_at || "").slice(0, 19))}</span></div>
+    ${o.error ? `<div class="risk-block">detail unavailable: ${esc(o.error)}</div>` : ""}
+    <div style="margin-top:8px;color:var(--txt);font-weight:600;letter-spacing:.06em">LIFECYCLE (${det.length})</div>
+    ${hist || `<div class="empty">no state history yet</div>`}
+    <div class="a-t" style="margin-top:6px">
+      ${isSetup
+        ? "Linked to causal setup " + esc(o.setup_id)
+        : "No causal setup linked. A READY opportunity is an observation, NOT an executable setup."}
+    </div>
+    <div style="display:flex;gap:6px;margin-top:8px">
+      <button class="mini" id="ctx-opp-clear">SHOW CHART CONTEXT</button>
+    </div>`;
+  const clr = $("#ctx-opp-clear"); if (clr) clr.onclick = clearOpportunitySelection;
+}
+
 function renderSetup() {
   const box = $("#setup-body");
+  if (!box) return;
+  renderContext();
+  if (S.selectedOpp) { renderOpportunityContext(box); return; }
   const { cand: c, row } = setupModel();
   if (!c) {
     const done = S.analysis ? S.analysis.last_closed_candle_time : null;
     box.innerHTML = S.analysis
       ? `<div class="empty" style="padding:10px 0">
            <div style="color:var(--txt);font-weight:600;letter-spacing:.06em">NO CAUSAL SETUP DETECTED</div>
-           <div style="margin-top:4px">${esc(S.symbol)} · engine causal path (D1→H4→M15) is authoritative</div>
+           <div style="margin-top:4px">chart context: ${esc(S.symbol)} · ${esc(S.tf)} — engine causal path (D1→H4→M15) is authoritative</div>
+           <div style="margin-top:4px;color:var(--dim)">A persisted READY opportunity is <b>not</b> a causal setup — see the OPPORTUNITIES panel.</div>
            <div class="a-t">last update ${esc(done || "—")}</div></div>`
       : `<div class="empty">MARKET DATA UNAVAILABLE — engine not consulted.</div>`;
     return;
@@ -926,6 +1105,7 @@ const LADDER_STEPS = ["WATCHING", "DEVELOPING", "EXECUTION_READY", "ORDER_PREPAR
 function renderLifecycle() {
   const box = $("#lifecycle-body"); if (!box) return;
   renderExec();
+  if (S.selectedOpp) { renderOpportunityContext(box); return; }
   const cur = S.setups.find(s => s.setup_id === S.selected) || S.setups[0];
   if (!cur) { box.innerHTML = `<div class="empty">no registered setups</div>`; return; }
   const inv = cur.display === "INVALIDATED";
@@ -1012,4 +1192,16 @@ function renderHistory(rows) {
       <td>${r.ticket ?? "—"}</td></tr>`).join("") || `<tr><td colspan="10" style="color:var(--faint)">no records</td></tr>`;
 }
 
-boot();
+/* Boot in the browser only. Under a Node test harness (globalThis.__SMC_TEST__)
+   the state machine is exercised directly through the exports below. */
+if (typeof document !== "undefined" && !(typeof globalThis !== "undefined" && globalThis.__SMC_TEST__)) boot();
+
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    S, selectChartSymbol, selectTimeframe, selectOpportunity, clearOpportunitySelection,
+    loadAnalysis, loadOpportunities, loadSetups, loadReadiness, loadCausalEvents,
+    drawChart, renderQuote, renderSetup, renderLifecycle, renderContext,
+    renderOpportunities, updatePriceTag, clearPriceTag, openContextDrawer,
+    renderOpportunityContext, setupModel, openStream,
+  };
+}

@@ -232,6 +232,15 @@ input:focus, select:focus, textarea:focus { outline: 1px solid var(--acc); }
   border-radius: 3px; align-self: center;
 }
 .ctx-pane { flex: 1; overflow-y: auto; }
+.ctx-context {
+  flex-shrink: 0; display: flex; align-items: center; gap: 8px;
+  padding: 5px 10px; font-size: 10.5px; letter-spacing: .05em;
+  border-bottom: 1px solid var(--line); background: var(--bg2);
+}
+.ctx-context .ctx-kind { font-weight: 700; color: var(--dim); }
+.ctx-context.opp .ctx-kind { color: var(--acc, #4f8cff); }
+.ctx-context .ctx-id { color: var(--txt); }
+.ctx-context .ctx-note { margin-left: auto; color: var(--faint); }
 
 /* ── Signals panel (right column) ──────────────────────────────────────── */
 #rightbar { flex: 1; }
