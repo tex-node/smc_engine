@@ -274,3 +274,44 @@ evidence-backed and the repeat-class mitigations are correct and tested
 instance cannot be reproduced (its runtime evidence was lost), so the incident
 closes only after a live re-run confirms one message per event with distinct
 `ref`s and delivery logs.
+
+---
+
+## 13. Controlled runtime verification (post-commit, revision dc65e06)
+
+Performed after `dc65e06` was pushed and CI passed. One intended instance only.
+
+* **Launch:** exactly one server, from `dc65e06`, via the `.venv` interpreter with
+  a verbose launcher (root logger at INFO so `telegram_send` is visible); MT5
+  credentials injected from the DPAPI store; working dir `C:\smc_engine` (repo DB).
+  Process tree: `.venv` python → system python (single server, PID 26512).
+* **Loaded-revision diagnostics (`/api/runtime`):** `git_commit=dc65e06`,
+  **`loaded_git_commit=dc65e06`**, **`stale_code=False`**,
+  `server_version=dc65e06`, `files_modified_after_startup={}` → the new
+  stale-process diagnostic correctly reports the loaded revision.
+* **No historical replay:** **0 GBPUSD notifications** delivered. Startup produced
+  16 genuinely-new transitions (8 `OPPORTUNITY_SUPERSEDED` from startup
+  reconciliation of pre-existing conflicts, 4 `READY`, 4 `ENTRY_TRIGGERED`) across
+  XAUUSD247/XAUUSD/CADJPY/XAGUSD/USDJPY/GBPCAD — not a replay of delivered events.
+* **Attribution + delivery logs:** every event logged
+  `telegram_send pid=… ref=… fp=… symbol=… kind=… event_id=… outcome=attempt` then
+  `… outcome=delivered`. 16 events → **16 distinct refs**, `send_count=16`,
+  `failure_count=0`, `deduplicated_count=0`, `uncertain=0`, `dropped=0`; **max
+  deliveries per ref = 1** (no duplicates).
+* **Repeat scans:** after ~2.5 min of continued polling (`last_scan_time`
+  advanced), the delivered set was **unchanged** (16 refs, no new/duplicate) →
+  re-scan does not re-send.
+* **Restart:** a fresh instance on the same DB delivered **0** and re-sent **none**
+  of the 16 pre-restart events → durable dedup survives restart.
+* **Cleanup:** the verification server was stopped; no smc_engine server/notifier
+  is left running. `LIVE_EXECUTION_ENABLED=False`; `Varis_SMC` untouched.
+
+**Runtime-verification outcome: PASSED for revision `dc65e06`** — one instance,
+correct loaded-revision diagnostics, no historical replay, one delivery per event
+with a stable ref and `delivered` log, and no re-send across scans or restart.
+
+**Overall incident status remains CONDITIONAL PASS:** the historical duplicate's
+exact mechanism (which process/DB, and which of the two candidate mechanisms)
+remains unresolved because the original process and database evidence were lost to
+the environment reset. What is now proven is that the current revision does not
+exhibit the repeat behaviour under scan and restart.
