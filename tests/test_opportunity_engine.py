@@ -224,8 +224,9 @@ def test_ready_persists_across_repeated_polls(tmp_path):
 def test_ready_expires_after_ttl(tmp_path):
     eng, repo = _engine(tmp_path, windows=OpportunityWindows(ready_ttl_bars=0))
     eng.observe("GBPUSD", _view())
-    # TTL sweep (watcher cadence) must expire a stale READY without deleting it
-    eng.expire_cycle()
+    # TTL sweep (watcher cadence) must expire a stale READY without deleting it.
+    # Expiry requires an explicit MARKET timestamp (never wall clock).
+    eng.expire_cycle(now=pd.Timestamp("2026-02-01", tz="UTC"))
     opp = repo.query(symbol="GBPUSD")[0]
     assert opp.state == St.EXPIRED.value
     assert opp.reason == "EXPIRED_TTL"

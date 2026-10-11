@@ -393,6 +393,10 @@ class EngineHub:
     def __init__(self, source: MarketSource, db_path: str = "smc_engine_gui.sqlite3",
                  setup_store_path: str = "smc_engine_state.sqlite3", magic: int = 202609):
         record_startup()
+        # Canonical DB identity, captured BEFORE the store opens the file, so a
+        # silently-created empty database is detectable (see runtime_info()).
+        self._db_path = os.path.abspath(db_path)
+        self._db_existed_at_startup = os.path.exists(self._db_path)
         self.source = source
         self.events = EventBus()
         self.web = WebStore(db_path)
@@ -414,6 +418,16 @@ class EngineHub:
         self.opportunities = OpportunityEngine(OpportunityRepository(db_path),
                                                config=MultiTimeframeConfig())
         self.funnel = FunnelRepository(db_path)
+        # Persisted opportunity state recovered at startup (authoritative across
+        # restarts). Surfaced via runtime_info().
+        self._recovery_counts_at_startup = self.opportunities.repo.state_counts()
+        if not self._db_existed_at_startup:
+            import logging
+            logging.getLogger(__name__).warning(
+                "opportunity database did not exist at startup (%s); initializing a "
+                "fresh empty monitoring state — verify SMC_GUI_DB_DIR and the working "
+                "directory before trusting opportunity state",
+                os.path.basename(self._db_path))
         self._opp_last_m15: dict[str, object] = {}
         self._symbol_diag: dict[str, dict] = {}
         self._last_scan: dict = {}
@@ -601,6 +615,15 @@ class EngineHub:
         )
         fp["account_identity"] = "AUTHORIZED" if ident["authorized"] else "UNAUTHORIZED"
         fp["engine_operational"] = ident["authorized"]
+        # Recovery/DB-identity diagnostics: which database this instance opened,
+        # whether it was pre-existing, and persisted opportunity counts by state.
+        fp["recovery"] = {
+            "db_path_basename": os.path.basename(self._db_path),
+            "db_existed_at_startup": self._db_existed_at_startup,
+            "db_initialized_empty": not self._db_existed_at_startup,
+            "counts_at_startup": dict(self._recovery_counts_at_startup),
+            "counts_current": self.opportunities.repo.state_counts(),
+        }
         return fp
 
     # ---------- market-data diagnostic (read-only) ----------
@@ -1535,7 +1558,6 @@ class EngineHub:
                  "opportunities_advanced": 0, "opportunities_invalidated": 0,
                  "opportunities_expired": 0, "converted_to_setup": 0,
                  "alerts_emitted": 0, "alerts_deduplicated": 0, "events": []}
-        data_now = None
         for sym in self.eligible_symbols():
             try:
                 last = self._last_closed_m15(sym)
@@ -1543,8 +1565,6 @@ class EngineHub:
                     stats["symbols_skipped"] += 1
                     continue
                 self._opp_last_m15[sym] = last
-                if last is not None:
-                    data_now = last if data_now is None else max(data_now, last)
                 stats["symbols_scanned"] += 1
                 view = self._causal_view(sym)
                 try:
@@ -1576,12 +1596,14 @@ class EngineHub:
                 stats["symbols_failed"] += 1
                 self._symbol_diag.setdefault(sym, {})["last_error"] = f"{type(exc).__name__}: {exc}"
                 continue
-        try:
-            # TTL sweep is anchored to the latest CLOSED market data time, not
-            # the wall clock: the closed-M15 cadence is authoritative.
-            self.opportunities.expire_cycle(now=data_now)
-        except Exception:
-            pass
+        # NOTE: there is deliberately NO global TTL sweep here. Expiry is
+        # per-symbol and market-anchored: OpportunityEngine._expire_symbol() runs
+        # inside observe() for every scanned symbol, using that symbol's own last
+        # closed M15 time. A global sweep keyed to max(last-closed-M15) would let
+        # a trading instrument expire a closed instrument's opportunities, and a
+        # wall-clock fallback would expire on a closed market or a restart —
+        # neither is acceptable. A symbol whose market has not advanced keeps its
+        # opportunities active; the next fresh scan reconciles them.
         diag = self.opportunities.diagnostics()
         stats["alerts_emitted"] = diag.get("alerts_emitted", 0)
         stats["alerts_deduplicated"] = diag.get("alerts_deduplicated", 0)

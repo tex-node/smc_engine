@@ -73,19 +73,29 @@ class OpportunityEngine:
             self._discover_continuation(symbol, view, now, result)
             self._advance_symbol(symbol, view, now, result)
             self._promote(symbol, view, result)
-            self._expire_symbol(symbol, now, result)
+            # TTL expiry is anchored to THIS symbol's market time only. If no
+            # market time is available (closed market / no data) expiry is
+            # skipped — never the wall clock.
+            self._expire_symbol(symbol, view.m15_last_time, result)
             self._diag["last_scan_time"] = _iso(now)
         return result
 
     def expire_cycle(self, symbol: Optional[str] = None,
                      now: Optional[pd.Timestamp] = None) -> dict:
-        """Cheap TTL sweep used by the watcher between data-driven scans.
+        """Explicit market-time TTL sweep — never the wall clock.
 
-        `now` may be supplied for deterministic replay/tests.
+        Expiry MUST be anchored to an explicit, valid MARKET timestamp. If `now`
+        is not supplied this is a safe no-op: missing market time must never fall
+        back to the system wall clock, which would expire persisted,
+        still-monitored opportunities on a closed market or a restart. Data
+        availability/degradation is reported by the market-data health surface,
+        not by the opportunity lifecycle.
         """
         out = {"expired": [], "events": []}
+        if now is None:
+            return out
         with self._lock:
-            now = pd.Timestamp(now) if now is not None else _now()
+            now = pd.Timestamp(now)
             for opp in self.repo.query(symbol=symbol, active_only=True, limit=1000):
                 if opp.expires_at and pd.Timestamp(opp.expires_at) < now:
                     self._terminate(opp, St.EXPIRED, BlockReason.EXPIRED_TTL.value,
@@ -590,6 +600,8 @@ class OpportunityEngine:
 
     # ------------------------------------------------------------- termination
     def _expire_symbol(self, symbol: str, now, result: dict) -> None:
+        if now is None:
+            return
         for opp in self.repo.query(symbol=symbol, active_only=True, limit=1000):
             if opp.expires_at and pd.Timestamp(opp.expires_at) < pd.Timestamp(now):
                 self._terminate(opp, St.EXPIRED, BlockReason.EXPIRED_TTL.value,
