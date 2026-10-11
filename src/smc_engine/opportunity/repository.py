@@ -6,6 +6,7 @@ Alert idempotency = UNIQUE(opportunity_id, transition, evidence_key).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import threading
@@ -15,12 +16,37 @@ from typing import Optional
 import pandas as pd
 
 from .models import Opportunity
+from .state_machine import is_terminal
 from ..web.dbwrite import serialized_write
 from ..web.dbwrite import serialized_read as _serialized_read
 
 
 def _utcnow() -> str:
     return pd.Timestamp.now(tz="UTC").isoformat()
+
+
+def identity_fingerprint(canonical_key: str) -> str:
+    """Stable, non-reversible short fingerprint of a canonical identity.
+
+    Used in collision diagnostics so an operator can correlate the affected row
+    without logging anything sensitive (the key is symbols/levels only, but a
+    fingerprint keeps diagnostics compact and diff-friendly)."""
+    return hashlib.sha256(str(canonical_key).encode("utf-8")).hexdigest()[:12]
+
+
+class OpportunityInvariantError(RuntimeError):
+    """Base class for authoritative identity/lifecycle invariant violations."""
+
+
+class OpportunityIdentityConflict(OpportunityInvariantError):
+    """An opportunity_id already refers to a different canonical identity.
+
+    Raised BEFORE any write so the existing row is never overwritten.
+    """
+
+
+class TerminalStateImmutable(OpportunityInvariantError):
+    """A terminal opportunity may not be silently reactivated via a write."""
 
 
 class OpportunityRepository:
@@ -68,12 +94,71 @@ class OpportunityRepository:
         """)
         self._conn.commit()
         self._lock = threading.RLock()
+        # Bounded, safe identity/lifecycle diagnostics (never sensitive).
+        self._identity_diags: list = []
+
+    # ---------- identity / lifecycle invariants ----------
+    def _row_identity(self, opportunity_id: str):
+        """(canonical_key, state) of the persisted row, or None if absent."""
+        r = self._conn.execute(
+            "SELECT canonical_key, state FROM opportunities WHERE opportunity_id=?",
+            (opportunity_id,)).fetchone()
+        return (r[0], r[1]) if r else None
+
+    def _record_identity_diag(self, kind: str, opportunity_id: str,
+                              incoming_key: str, existing_key: Optional[str] = None,
+                              existing_state: Optional[str] = None) -> None:
+        self._identity_diags.append({
+            "kind": kind,
+            "opportunity_id": opportunity_id,
+            "incoming_key_fp": identity_fingerprint(incoming_key),
+            "existing_key_fp": identity_fingerprint(existing_key) if existing_key else None,
+            "existing_state": existing_state,
+            "at": _utcnow(),
+        })
+        if len(self._identity_diags) > 200:
+            del self._identity_diags[0]
+
+    def _assert_identity_invariants(self, opp: Opportunity) -> None:
+        """Enforce, at the authoritative write boundary:
+          1. an opportunity_id refers to exactly one canonical identity;
+          2. a terminal row cannot be silently changed to another state.
+        """
+        existing = self._row_identity(opp.opportunity_id)
+        if existing is None:
+            return
+        existing_key, existing_state = existing
+        if existing_key != opp.canonical_key:
+            self._record_identity_diag("IDENTITY_COLLISION", opp.opportunity_id,
+                                       opp.canonical_key, existing_key, existing_state)
+            raise OpportunityIdentityConflict(
+                f"opportunity_id {opp.opportunity_id!r} is bound to a different "
+                f"canonical identity (existing_fp="
+                f"{identity_fingerprint(existing_key)}, "
+                f"incoming_fp={identity_fingerprint(opp.canonical_key)})")
+        if is_terminal(existing_state) and not is_terminal(opp.state):
+            # Reactivating a terminal row (terminal -> non-terminal) is forbidden.
+            # Terminal -> terminal reclassification is allowed (lifecycle contract).
+            self._record_identity_diag("TERMINAL_IMMUTABILITY", opp.opportunity_id,
+                                       opp.canonical_key, existing_key, existing_state)
+            raise TerminalStateImmutable(
+                f"terminal opportunity {opp.opportunity_id!r} ({existing_state}) "
+                f"cannot be reactivated to active state {opp.state}")
+
+    def identity_diagnostics(self) -> list:
+        with self._lock:
+            return list(self._identity_diags)
+
+    def reset_identity_diagnostics(self) -> None:
+        with self._lock:
+            self._identity_diags = []
 
     # ---------- write ----------
     @serialized_write
     def upsert(self, opp: Opportunity) -> None:
         d = asdict(opp)
         with self._lock:
+            self._assert_identity_invariants(opp)
             self._conn.execute(
                 """INSERT INTO opportunities
                    (opportunity_id, canonical_key, symbol, symbol_norm, direction,
@@ -97,6 +182,61 @@ class OpportunityRepository:
                  opp.risk_status, opp.reason, opp.blocker, opp.next_expected,
                  json.dumps(d, default=str, sort_keys=True)))
             self._conn.commit()
+
+    @serialized_write
+    def apply_transition(self, opp: Opportunity, from_state: str, to_state: str,
+                         reason: str, detail: str, kind: str,
+                         evidence_key: str, message: str) -> bool:
+        """Atomically persist a state change + its state-history row + its
+        lifecycle event in a single transaction.
+
+        Returns True when the event is newly recorded; False when it is an
+        idempotent replay of the SAME logical transition
+        (opportunity_id, transition, evidence_key). Identity and terminal-
+        immutability invariants are enforced before any write.
+        """
+        opp.state = to_state
+        d = asdict(opp)
+        if from_state == to_state:
+            # No state change -> no transition, no history row, no event.
+            return False
+        with self._lock:
+            self._assert_identity_invariants(opp)
+            try:
+                self._conn.execute(
+                    """UPDATE opportunities SET
+                         state=?, updated_at=?, expires_at=?, last_seen=?,
+                         setup_id=?, risk_status=?, reason=?, blocker=?,
+                         next_expected=?, payload_json=?
+                       WHERE opportunity_id=?""",
+                    (to_state, str(opp.updated_at),
+                     str(opp.expires_at) if opp.expires_at else None,
+                     str(opp.last_seen), opp.setup_id, opp.risk_status,
+                     opp.reason, opp.blocker, opp.next_expected,
+                     json.dumps(d, default=str, sort_keys=True),
+                     opp.opportunity_id))
+                self._conn.execute(
+                    """INSERT INTO opportunity_state_history
+                       (opportunity_id, at, from_state, to_state, reason, detail)
+                       VALUES(?,?,?,?,?,?)""",
+                    (opp.opportunity_id, _utcnow(), from_state, to_state, reason, detail))
+                # Dedup identity includes the concrete transition (from->to), not
+                # just the event kind, so a genuinely NEW transition is never
+                # suppressed merely because an old evidence_key was reused; only
+                # a true replay of the same transition+evidence is suppressed.
+                transition_token = f"{from_state}->{to_state}"
+                cur = self._conn.execute(
+                    """INSERT OR IGNORE INTO opportunity_events
+                       (opportunity_id, at, transition, evidence_key, kind, message)
+                       VALUES(?,?,?,?,?,?)""",
+                    (opp.opportunity_id, _utcnow(), transition_token,
+                     evidence_key, kind, message))
+                fresh = cur.rowcount > 0
+                self._conn.commit()
+                return fresh
+            except Exception:
+                self._conn.rollback()
+                raise
 
     @serialized_write
     def record_state_change(self, opportunity_id: str, from_state: str, to_state: str,

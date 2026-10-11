@@ -22,7 +22,8 @@ from .models import (TERMINAL_STATES, BlockReason, EntryPathway, Opportunity,
                      OpportunityType as Ty, OpportunityWindows,
                      canonical_opportunity_key, opportunity_id_from_key,
                      _ns)
-from .repository import OpportunityRepository
+from .repository import (OpportunityRepository, OpportunityIdentityConflict,
+                         TerminalStateImmutable)
 from .state_machine import assert_transition, is_terminal
 
 
@@ -106,7 +107,7 @@ class OpportunityEngine:
     def _arm(self, key: str, symbol: str, direction: str, otype: str,
              anchor_kind: str, anchor_time, anchor_level: float,
              evidence: dict, pathway: str, now, result: dict,
-             initial_state: str = St.OPPORTUNITY_ARMED.value) -> Opportunity:
+             initial_state: str = St.OPPORTUNITY_ARMED.value) -> Optional[Opportunity]:
         opp = Opportunity(
             opportunity_id=opportunity_id_from_key(key), canonical_key=key,
             symbol=symbol, direction=direction, opportunity_type=otype,
@@ -129,9 +130,17 @@ class OpportunityEngine:
             opp.bos_time = _iso(anchor_time)
             opp.expires_at = _iso(pd.Timestamp(anchor_time) + pd.Timedelta(
                 minutes=15 * self.windows.continuation_bos_to_poi_bars))
-        self.repo.upsert(opp)
-        self.repo.record_state_change(opp.opportunity_id, St.IDLE.value,
-                                      opp.state, "armed", anchor_kind)
+        try:
+            self.repo.upsert(opp)
+            self.repo.record_state_change(opp.opportunity_id, St.IDLE.value,
+                                          opp.state, "armed", anchor_kind)
+        except (OpportunityIdentityConflict, TerminalStateImmutable) as exc:
+            # Authoritative safety net: an identity collision or an attempt to
+            # reactivate a terminal row is refused and surfaced, never applied.
+            result["blocked"].append({
+                "key": key, "reason": "identity_invariant",
+                "block": BlockReason.DUPLICATE.value, "detail": str(exc)})
+            return None
         self._emit(opp, Ev.OPPORTUNITY_CREATED.value, f"{anchor_kind}:{_ns(anchor_time)}",
                    f"{symbol} {direction} {otype} armed ({anchor_kind})", result)
         result["created"].append(opp.opportunity_id)
@@ -160,8 +169,21 @@ class OpportunityEngine:
                          else Direction.BEARISH)
             key = canonical_opportunity_key(symbol, direction.value, Ty.REVERSAL.value,
                                             "SWEEP", sweep.candle_time, sweep.swept_level)
-            if self.repo.get_by_key(key) is not None:
-                continue                          # duplicate sweep: one opportunity
+            known = self.repo.get_by_key(key)
+            collided = self.repo.get(opportunity_id_from_key(key))
+            if known is not None or collided is not None:
+                # Same logical setup already persisted — OR a legacy ID collision
+                # (a different canonical key that derives the same opportunity_id).
+                # NEVER re-arm: a terminal row stays terminal; a distinct identity
+                # is safely skipped with an observable diagnostic rather than
+                # silently overwriting another row.
+                if collided is not None and collided.canonical_key != key:
+                    result["blocked"].append({
+                        "key": key, "reason": "identity_collision",
+                        "block": BlockReason.DUPLICATE.value,
+                        "opportunity_id": collided.opportunity_id,
+                        "existing_state": collided.state})
+                continue
             evidence = {"id": sweep.id, "side": sweep.side.value,
                         "swept_level": float(sweep.swept_level),
                         "sweep_extreme": float(sweep.sweep_extreme),
@@ -193,6 +215,8 @@ class OpportunityEngine:
                                 sweep.candle_time, sweep.swept_level, evidence,
                                 self._reversal_pathway(), now, result,
                                 initial_state=initial)
+                if opp is None:
+                    continue
                 opp.csd_evidence = {"id": csd.id, "direction": csd.direction.value,
                                     "level": float(csd.level), "time": _iso(csd.candle_time)}
                 opp.csd_time = _iso(csd.candle_time)
@@ -218,7 +242,15 @@ class OpportunityEngine:
             key = canonical_opportunity_key(symbol, bos.direction.value,
                                             Ty.CONTINUATION.value, "BOS",
                                             bos.candle_time, bos.level)
-            if self.repo.get_by_key(key) is not None:
+            known = self.repo.get_by_key(key)
+            collided = self.repo.get(opportunity_id_from_key(key))
+            if known is not None or collided is not None:
+                if collided is not None and collided.canonical_key != key:
+                    result["blocked"].append({
+                        "key": key, "reason": "identity_collision",
+                        "block": BlockReason.DUPLICATE.value,
+                        "opportunity_id": collided.opportunity_id,
+                        "existing_state": collided.state})
                 continue
             evidence = {"id": bos.id, "type": bos.type.value,
                         "direction": bos.direction.value, "level": float(bos.level),
@@ -578,14 +610,21 @@ class OpportunityEngine:
         opp.reason = BlockReason.SUPERSEDED_THESIS.value
         opp.blocker = BlockReason.SUPERSEDED_THESIS.value
         opp.updated_at = _iso(now)
-        self.repo.upsert(opp)
-        self.repo.record_state_change(opp.opportunity_id, previous,
-                                      St.SUPERSEDED.value,
-                                      BlockReason.SUPERSEDED_THESIS.value, reason)
-        self._emit(opp, Ev.OPPORTUNITY_SUPERSEDED.value,
-                   f"superseded:{winner_key}",
-                   f"{opp.symbol} {opp.direction} {opp.opportunity_type} superseded by "
-                   f"{winner_key}", result)
+        evidence_key = f"superseded:{winner_key}"
+        message = (f"{opp.symbol} {opp.direction} {opp.opportunity_type} superseded by "
+                   f"{winner_key}")
+        fresh = self.repo.apply_transition(opp, previous, St.SUPERSEDED.value,
+                                           BlockReason.SUPERSEDED_THESIS.value, reason,
+                                           Ev.OPPORTUNITY_SUPERSEDED.value,
+                                           evidence_key, message)
+        if fresh:
+            self._diag["alerts_emitted"] += 1
+            result["events"].append({"opportunity_id": opp.opportunity_id,
+                                     "kind": Ev.OPPORTUNITY_SUPERSEDED.value,
+                                     "message": message, "symbol": opp.symbol,
+                                     "state": opp.state, "event_id": evidence_key})
+        else:
+            self._diag["alerts_deduplicated"] += 1
         result["superseded"].append(opp_id)
         self.arbiter.opportunities_superseded += 1
 
@@ -621,15 +660,22 @@ class OpportunityEngine:
         opp.blocker = reason
         opp.updated_at = _iso(now)
         opp.observed_time = _iso(now)
-        self.repo.upsert(opp)
-        self.repo.record_state_change(opp.opportunity_id, previous, state.value,
-                                      reason, detail)
         kind = event_kind or (Ev.INVALIDATED.value if state is St.INVALIDATED
                               else Ev.EXPIRED.value if state is St.EXPIRED
                               else Ev.OPPORTUNITY_ADVANCED.value)
-        self._emit(opp, kind, self._event_identity(opp, reason),
-                   f"{opp.symbol} {opp.direction} {opp.opportunity_type} -> "
-                   f"{state.value} ({reason})", result)
+        evidence_key = self._event_identity(opp, reason)
+        message = (f"{opp.symbol} {opp.direction} {opp.opportunity_type} -> "
+                   f"{state.value} ({reason})")
+        fresh = self.repo.apply_transition(opp, previous, state.value, reason,
+                                           detail, kind, evidence_key, message)
+        if fresh:
+            self._diag["alerts_emitted"] += 1
+            result["events"].append({"opportunity_id": opp.opportunity_id,
+                                     "kind": kind, "message": message,
+                                     "symbol": opp.symbol, "state": opp.state,
+                                     "event_id": evidence_key})
+        else:
+            self._diag["alerts_deduplicated"] += 1
         bucket = ("invalidated" if state is St.INVALIDATED
                   else "expired" if state is St.EXPIRED else "advanced")
         result[bucket].append(opp.opportunity_id)
@@ -647,12 +693,19 @@ class OpportunityEngine:
         opp.updated_at = _iso(now)
         opp.last_seen = _iso(now)
         opp.observed_time = _iso(now)
-        self.repo.upsert(opp)
-        self.repo.record_state_change(opp.opportunity_id, previous, target.value,
-                                      reason, detail)
-        self._emit(opp, event_kind or Ev.OPPORTUNITY_ADVANCED.value,
-                   f"{reason}:{_ns(evidence_time or self._event_anchor(opp))}",
-                   f"{opp.symbol} {target.value} ({detail})", result)
+        kind = event_kind or Ev.OPPORTUNITY_ADVANCED.value
+        evidence_key = f"{reason}:{_ns(evidence_time or self._event_anchor(opp))}"
+        message = f"{opp.symbol} {target.value} ({detail})"
+        fresh = self.repo.apply_transition(opp, previous, target.value, reason,
+                                           detail, kind, evidence_key, message)
+        if fresh:
+            self._diag["alerts_emitted"] += 1
+            result["events"].append({"opportunity_id": opp.opportunity_id,
+                                     "kind": kind, "message": message,
+                                     "symbol": opp.symbol, "state": opp.state,
+                                     "event_id": evidence_key})
+        else:
+            self._diag["alerts_deduplicated"] += 1
         result["advanced"].append(opp.opportunity_id)
         self._diag["opportunities_advanced"] += 1
 

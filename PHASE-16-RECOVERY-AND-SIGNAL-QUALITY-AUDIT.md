@@ -346,3 +346,212 @@ resolution behaviour (§8): an unintended empty DB warns and is flagged but does
 not hard-fail, which should be hardened (explicit canonical path) in a follow-up
 once deployment/first-run requirements are confirmed. Signal quality remains
 `INSUFFICIENT DATA` and is unaffected by this review.
+
+---
+
+## 14. Controlled deployment of `09c7ce2` (Phase 16D)
+
+**Pre-deployment state.** Running instance PID 37192 (child of `.venv` python
+31556 ← launcher cmd 39520), started 2026-10-11T05:53:27Z, listener on
+`127.0.0.1:8765`; `/api/runtime` → `loaded_git_commit=46b671a`,
+`git_commit=09c7ce2`, **`stale_code=True`**, `files_modified_after_startup=[web/hub.py]`
+(the old instance had not loaded the recovery change). Canonical DB
+`C:\smc_engine\smc_engine_gui.sqlite3` existed. Baseline funnel: total 185
+(`ENTRY_TRIGGERED 51, EXPIRED 114, INVALIDATED 12, SUPERSEDED 8`); telegram
+`send_count=1` (GBPJPY, 05:54).
+
+**Backup (before restart).** Consistent copy via the SQLite **backup API**
+(WAL-safe, not a file copy): `…\smc16\backups\smc_engine_gui_20261011_141937.sqlite3`;
+`PRAGMA integrity_check = ok`; 185 opportunities / 1541 events; states matched.
+
+**Restart (smc_engine only).** Stopped exactly 37192, 31556, 39520; port 8765
+released and no smc process remained. Started one instance via the documented
+launcher (`start_workstation.bat` → `load_mt5_credentials.ps1`, DPAPI creds):
+new tree cmd 34052 → `.venv` python 20812 → system python **37656** (listener).
+Identity gate AUTHORIZED, account `477217728 @ Exness-MT5Trial9` DEMO. MT5 and
+`Varis_SMC` were not touched.
+
+**Runtime verification (new instance).**
+`loaded_git_commit=09c7ce2`, `git_commit=09c7ce2`, **`stale_code=False`**,
+`files_modified_after_startup=[]`; `recovery.db_existed_at_startup=true`,
+`db_initialized_empty=false`; canonical DB in use; **exactly one** instance.
+
+**Before/after opportunity counts and transitions.** Total unchanged (185); no
+new events emitted by the deployment scan (`last_scan.events=[]`,
+`alerts_deduplicated=14`, `symbols_skipped=24` — market closed). Settled state:
+`{ENTRY_TRIGGERED 51, EXPIRED 113, INVALIDATED 12, SUPERSEDED 8,
+WAITING_FOR_CONFIRMATION 1}`. Exactly **one** non-terminal opportunity carries an
+`EXPIRED` event — `OPP-REVERSAL-GBPAUD-SWEEP-1791518400000000000-BULLISH` — a
+**historical resurrection artifact**: its event log shows `EXPIRED`
+(2026-10-10T11:23:06) then `OPPORTUNITY_ADVANCED`→`WAITING_FOR_CONFIRMATION`
+(2026-10-10T11:23:30), produced under the **pre-Phase-14C** code (its preceding
+events use the old `WAITING_FOR_CSD:<advancing_ns>` identity). The current
+revision **cannot** resurrect it: `repository.query(active_only=True)` excludes
+`EXPIRED` (`repository.py:169-171`), and per-symbol expiry uses the symbol's own
+market time (2026-10-09 20:30) which is **before** this opp's `expires_at`
+(2026-10-10 04:00), so `09c7ce2` neither expires nor reactivates it. The
+deployment therefore caused **no** opportunity-state change; the 1-count delta
+versus the startup read is this pre-existing artifact surfacing on the settled
+read (a read-timing ambiguity noted below).
+
+**Recovery acceptance.** Confirmed by the deterministic regression tests
+(`tests/test_recovery.py`, 14): no wall-clock expiry on missing market time;
+per-symbol market time only; genuine expiry when the symbol's own time advances;
+closed-market/feed-outage distinguishable; persisted state + history survive
+restart; idempotent reconciliation; delivered events not replayed. Not reproduced
+against production data (market closed).
+
+**Notification observation.** New instance `telegram_send_count=0`; no re-delivery
+of previously delivered events; **no new eligible event occurred** (market closed,
+all symbols skipped) → **live new-event delivery remains unverified.** Because the
+notification layer still lacks a durable delivery ledger, no exactly-once claim is
+made across crashes/ambiguous outcomes. `Varis_SMC` was not touched.
+
+**Rollback conditions:** none triggered (DB opened + backed up; intended DB; loaded
+revision correct and not stale; history intact; one instance; live execution
+disabled).
+
+**Remaining risks / limitations.** (a) A **read-timing ambiguity**: the
+`counts_at_startup`/backup reads showed 114 `EXPIRED` while the settled read shows
+113 + 1; the single affected row is the historical artifact above, and no
+transition event was emitted by the deployment. (b) The historical resurrection
+artifact remains in the DB (terminal-immutability prevents re-labelling; it is
+inert and cannot be advanced by the current code). (c) Live new-event Telegram
+delivery unverified (no eligible event). (d) `LIVE_EXECUTION_ENABLED=False`
+confirmed.
+
+**Final recovery decision: PASS** (deployment loaded the intended revision against
+the intended DB with no artificial expiry/supersession; recovery guarantees
+test-backed). Live new-event notification delivery: **CONDITIONAL** (unverified —
+no eligible event occurred). Signal quality: **INSUFFICIENT DATA**.
+
+---
+
+## 15. Phase 16E — CORRECTION: the deployment DID mutate opportunity state (§14 superseded)
+
+§14 stated that `09c7ce2` "cannot resurrect" the GBPAUD row and attributed the
+`EXPIRED 114→113 / WAITING_FOR_CONFIRMATION 0→1` delta to a "read-timing
+ambiguity". **A read-only reconciliation (see `PHASE-16D-OPPORTUNITY-STATE-RECONCILIATION.md`)
+disproved that.** The delta was a **real, single-row state mutation** performed by
+the newly deployed process.
+
+### Confirmed mutation
+`OPP-REVERSAL-GBPAUD-SWEEP-1791518400000000000-BULLISH` changed
+`EXPIRED → OPPORTUNITY_ARMED → WAITING_FOR_CONFIRMATION`, with state-history rows at
+**`2026-10-11T13:21:30.515Z` / `.518Z`** — `~56 s` after `server_started_at=13:20:34.5Z`
+and after that process's first per-symbol analysis (`GBPAUD last_analysis_time=13:20:49Z`).
+The pre-deployment backup (13:19:37Z) had it `EXPIRED`. `opportunity_events` was
+unchanged (1541) because the `_arm`-path `OPPORTUNITY_CREATED` event was
+deduplicated — which is why the deployment scan was reported as producing "no events".
+
+### Confirmed root cause
+1. `canonical_opportunity_key()` includes `anchor_level`; `opportunity_id_from_key()`
+   **drops** it → two canonical keys (same time, drifted level) share one `opportunity_id`.
+2. `_discover_reversal()` guarded only by `get_by_key()` → a drifted-level re-observation
+   was **not found** → `_arm()` ran.
+3. `upsert()` `ON CONFLICT(opportunity_id) DO UPDATE` overwrote `state`/`payload` and
+   **never updated/validated `canonical_key`**, and bypassed the state machine → a
+   terminal row was re-armed.
+4. The old revision (`46b671a`, stale `hub.py`) re-armed at `05:54:06Z` and
+   **re-expired by wall-clock at `05:54:28Z`**; the new revision's **per-symbol
+   market-anchored expiry** (GBPAUD market time `2026-10-09 20:30Z` < `expires_at
+   2026-10-10 04:00Z`) no longer re-expires it → it stuck as `WAITING_FOR_CONFIRMATION`.
+
+### Corrected guarantees (Phase 16E fix — local, uncommitted)
+* **Canonical identity contract:** the indexed `canonical_key` column is the row's
+  authoritative identity; `opportunity_id` is a legacy-derived handle. `upsert` and
+  `apply_transition` now **refuse** (with a safe diagnostic) any write whose incoming
+  `canonical_key` differs from the persisted one — an id can bind to exactly one key.
+* **Terminal immutability at the mutation boundary:** a terminal row (`EXPIRED`,
+  `INVALIDATED`, `SUPERSEDED`, `ENTRY_TRIGGERED`, `TERMINAL`) can never be written to a
+  **non-terminal** state (terminal→terminal reclassification remains allowed).
+* **Discovery guard by identity:** `_discover_*` now also checks the derived
+  `opportunity_id`, so a drifted-level re-observation is skipped with an observable
+  diagnostic rather than re-armed.
+* **Atomic transitions + event consistency:** `apply_transition()` commits the row
+  update + `opportunity_state_history` + `opportunity_events` in one transaction; the
+  dedup key now includes the concrete `from->to` transition, so a genuine new
+  transition is never suppressed by a reused evidence key; an unchanged state records
+  nothing.
+* **Regression proof:** `tests/test_identity_integrity.py` (16 tests) reproduces the
+  GBPAUD collision; a minimal reproduction returns `OPPORTUNITY_ARMED` (resurrected)
+  on the pre-fix code and `BLOCKED: OpportunityIdentityConflict` / `FINAL_STATE:
+  EXPIRED` on the fix.
+
+### Outstanding migration risks (read-only assessment)
+`tools/phase16e_identity_assessment.py` over the live DB (via backup-API snapshot):
+**10** rows where `column canonical_key` disagrees with `payload.canonical_key`,
+**10** rows with a terminal→later-non-terminal history, **11** opportunities whose
+history-transition count exceeds their event count, **0** potential duplicate groups
+under a level-inclusive id. These are **pre-existing** inconsistencies (the GBPAUD row
+is one). No production repair was performed; every repair is proposed only (§7 of
+`PHASE-16D-…md`) and must run in a disposable copy pending an approved migration.
+
+This correction does not change the recovery *fix* (per-symbol market-time expiry is
+correct and retained); it corrects the **record** of what the deployment did and adds
+the identity/terminal/event hardening.
+
+---
+
+## 16. Phase 16E — recomputed migration assessment and acceptance gates
+
+**Method.** `tools/phase16e_identity_assessment.py` opens the operational DB
+`mode=ro` and takes a consistent **SQLite backup-API** snapshot into `%TEMP%\smc16e\`;
+it never writes the source. Recomputed `2026-10-11T19:13Z` on a fresh snapshot
+(prior figures in parentheses). Counts are measured, not assumed.
+
+| category | fresh (prior) |
+|---|---|
+| total_opportunities | **186** (185 — DB grew by one row) |
+| key_mismatch (column key ≠ payload key) | **10** (10) |
+| id_drift (id no longer derives from payload key) | **0** (0) |
+| reactivation (terminal → later non-terminal history) | **10** (10) |
+| history_gt_events (history rows > event rows) | **11** (11) |
+| potential_duplicate_groups (level-inclusive id) | **0** (0) |
+
+**Affected rows and proposed dispositions** (all read-only; **no production repair
+executed**):
+
+| opportunity_id | column → payload key | row state | terminal→active | disposition |
+|---|---|---|---|---|
+| OPP-REVERSAL-GBPAUD-SWEEP-1791518400000000000-BULLISH | 1.89623 → 1.89628 | WAITING_FOR_CONFIRMATION (live) | yes (EXPIRED→ARMED) | **QUARANTINE / MANUAL REVIEW** — only live resurrected row |
+| OPP-REVERSAL-AUDUSD-SWEEP-1789992000000000000-BEARISH | 0.71396 → 0.7136 | EXPIRED | yes | NO ACTION (terminal; column key authoritative) |
+| OPP-CONTINUATION-CHFJPY-BOS-1791345600000000000-BEARISH | 189.887 → 189.827 | ENTRY_TRIGGERED | yes | NO ACTION (terminal) |
+| OPP-CONTINUATION-CHFJPY-BOS-1791374400000000000-BEARISH | 189.887 → 189.827 | ENTRY_TRIGGERED | yes | NO ACTION (terminal) |
+| OPP-REVERSAL-ETHUSD-SWEEP-1786896000000000000-BEARISH | 1886.28 → 1884.33 | EXPIRED | yes | NO ACTION (terminal) |
+| OPP-REVERSAL-EURGBP-SWEEP-1790064000000000000-BULLISH | 0.85695 → 0.85716 | EXPIRED | yes | NO ACTION (terminal) |
+| OPP-REVERSAL-GBPCHF-SWEEP-1790827200000000000-BEARISH | 1.10454 → 1.10967 | EXPIRED | yes | NO ACTION (terminal) |
+| OPP-REVERSAL-USDCAD-SWEEP-1786492800000000000-BULLISH | 1.39252 → 1.39262 | EXPIRED | yes | NO ACTION (terminal) |
+| OPP-REVERSAL-XAUUSD247-SWEEP-1788840000000000000-BEARISH | 4437.056 → 4435.029 | EXPIRED | yes | NO ACTION (terminal) |
+| OPP-REVERSAL-GBPUSD-SWEEP-1791432000000000000-BULLISH | 1.31898 → 1.31931 | EXPIRED | yes | NO ACTION (terminal) |
+| OPP-REVERSAL-GBPUSD-SWEEP-1791374400000000000-BULLISH | (column == payload) | EXPIRED | yes | **QUARANTINE / MANUAL REVIEW** — reactivation with no key drift, not explained by the collision |
+
+**`history_gt_events` reconciliation (11 rows).** Not a lost transition. The pre-fix
+`_arm`/`_transition`/`_terminate` always inserted an `opportunity_state_history` row,
+while `record_event_once` deduplicated the matching event by
+`(opportunity_id, transition=kind, evidence_key)`. On a repeated re-arm of the same key
+the `IDLE→OPPORTUNITY_ARMED(armed)` history row was written but the `OPPORTUNITY_CREATED`
+event was suppressed (same evidence `SWEEP:<ns>`). So those specific history rows have
+no event by design; **no genuine transition lacks an event**.
+
+**One id ↔ multiple identities.** `id_drift=0`: every `opportunity_id` still derives
+from its persisted key. The collision manifests *within* a single row (frozen column key
++ overwritten payload key), not as two distinct rows. No row was merged, re-keyed,
+deleted, or invented.
+
+### Acceptance gates (Phase 16E)
+
+1. **Expiry & recovery reliability — PASS.** Per-symbol market-time expiry retained;
+   `expire_cycle(None)` is a no-op; `tests/test_recovery.py` (14) +
+   `test_per_symbol_market_time_expiry_still_records_event` pass; full suite **624
+   passed / 1 skipped**.
+2. **Canonical identity & terminal-state integrity — PASS (fix) / migration PENDING.**
+   Identity collision refused at `upsert`/`apply_transition` with a safe diagnostic;
+   terminal immutability enforced at the write boundary; discovery guards by identity;
+   `tests/test_identity_integrity.py` (16) pass. The two quarantine rows require an
+   approved, disposable-copy migration.
+3. **Notification-delivery reliability — CONDITIONAL.** Lifecycle events now persist
+   atomically with the transition, but the durable Telegram **delivery** ledger remains
+   a separate follow-up; exactly-once remote delivery is **not** claimed.
+4. **Signal quality — INSUFFICIENT DATA.** Unchanged: no adequate historical OHLC
+   dataset.

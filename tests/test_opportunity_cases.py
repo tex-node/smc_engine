@@ -32,6 +32,11 @@ def test_opposing_csd_invalidates(tmp_path):
                           "sweep_extreme": 101.5, "time": "2026-01-25 00:00:00+00:00"}
     opp.csd_evidence = {}
     opp.state = St.OPPORTUNITY_ARMED.value
+    # This scenario needs an ACTIVE opportunity. Terminal-state immutability
+    # forbids reactivating the persisted (EXPIRED) row via upsert, so reset the
+    # disposable row before re-inserting it as active.
+    repo._conn.execute("DELETE FROM opportunities WHERE opportunity_id=?", (original_id,))
+    repo._conn.commit()
     repo.upsert(opp)
     eng.observe("GBPUSD", view)
     # Phase 11: the arbiter sees a stronger same-instrument thesis (WAITING_FOR_POI
