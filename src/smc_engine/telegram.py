@@ -17,11 +17,13 @@ import json
 import logging
 import os
 import queue
+import random
 import socket
 import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
 _log = logging.getLogger(__name__)
@@ -61,11 +63,22 @@ def _event_ref(opp_id: str, kind: str, event_id: str) -> str:
     return hashlib.sha256(f"{opp_id}|{kind}|{event_id}".encode("utf-8")).hexdigest()[:10]
 
 
+def _notification_id(opp_id: str, kind: str, event_id: str) -> str:
+    """Stable, unique id for one logical notification (durable outbox key)."""
+    return hashlib.sha256(f"{opp_id}|{kind}|{event_id}".encode("utf-8")).hexdigest()
+
+
 def _message_fingerprint(text: str) -> str:
     """Short fingerprint of the exact outbound text (for logs; secret-safe)."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:10]
 _MAX_RETRY_AFTER_S = 60.0
 _MAX_RETRIES = 2
+
+# Durable outbox tunables.
+_STALE_INFLIGHT_S = 300          # IN_FLIGHT older than this is recovered to PENDING
+_MAX_ATTEMPTS = 5                # per-record attempt budget before FAILED_PERMANENT
+_BASE_BACKOFF_S = 2.0
+_MAX_BACKOFF_S = 300.0
 
 
 def _load_credentials(path: str) -> tuple[str, str]:
@@ -213,6 +226,7 @@ class TelegramNotifier:
         enabled_kinds: Optional[frozenset] = None,
         min_send_interval: float = _MIN_SEND_INTERVAL_S,
         quarantine_check: Optional[Callable[[str], bool]] = None,
+        ledger: Optional[object] = None,
     ):
         self._enabled = False
         self._configured = False
@@ -225,6 +239,10 @@ class TelegramNotifier:
         # Authoritative persistent quarantine predicate (opportunity_id -> bool).
         # Consulted immediately before every outbound send; see _is_quarantined.
         self._quarantine_check = quarantine_check
+        # Optional durable outbox (durable intent + at-least-once attempts). When
+        # present the in-memory queue is bypassed and the outbox is the queue.
+        self._ledger = ledger
+        self._wake = threading.Event()
         self._queue: queue.Queue = queue.Queue(maxsize=_MAX_QUEUE_SIZE)
         self._stop = threading.Event()
         self._last_send_time = 0.0
@@ -305,6 +323,19 @@ class TelegramNotifier:
                 + f"\n\n\u2014 {_SOURCE_TAG} \u00b7 ref {ref}")
         item = {"symbol": symbol, "kind": kind, "event_id": event_id,
                 "opp_id": opp_id, "ref": ref, "text": text}
+        if self._ledger is not None:
+            # Durable mode: persist intent BEFORE dispatch. Fail closed — never
+            # send without a durable record. The outbox is the queue.
+            try:
+                self._ledger.record_intent(_notification_id(opp_id, kind, event_id),
+                                           opp_id, kind, event_id, symbol, text)
+                with self._lock:
+                    self._bump(symbol, "queued")
+                self._wake.set()
+            except Exception:
+                _log.warning(
+                    "notification ledger unavailable; not enqueuing %s %s", symbol, kind)
+            return
         try:
             self._queue.put_nowait(item)
             with self._lock:
@@ -340,6 +371,9 @@ class TelegramNotifier:
     # ------------------------------------------------------------------
 
     def _worker(self) -> None:
+        if self._ledger is not None:
+            self._worker_durable()
+            return
         while not self._stop.is_set():
             try:
                 item = self._queue.get(timeout=1.0)
@@ -349,6 +383,108 @@ class TelegramNotifier:
                 self._send_with_retry(item)
             finally:
                 self._queue.task_done()
+
+    def _worker_durable(self) -> None:
+        """Drain the durable outbox: recover stale claims, then claim + dispatch."""
+        try:
+            self._ledger.recover_stale(_STALE_INFLIGHT_S)
+        except Exception:
+            _log.warning("outbox stale-claim recovery failed")
+        while not self._stop.is_set():
+            try:
+                rec = self._ledger.claim_next()
+            except Exception:
+                _log.warning("outbox claim failed")
+                rec = None
+            if rec is None:
+                self._wake.wait(timeout=1.0)
+                self._wake.clear()
+                continue
+            try:
+                self._dispatch_record(rec)
+            except Exception:
+                _log.warning("outbox dispatch failed for %s", rec.get("notification_id"))
+
+    def _backoff_seconds(self, attempts: int) -> float:
+        base = min(_BASE_BACKOFF_S * (2 ** max(0, attempts - 1)), _MAX_BACKOFF_S)
+        return base * (0.5 + random.random() * 0.5)          # bounded jitter
+
+    def _dispatch_record(self, rec: dict) -> None:
+        nid = rec["notification_id"]
+        opp_id = rec.get("opportunity_id", "")
+        symbol = rec.get("symbol", "?")
+        # Final quarantine check immediately before dispatch (fail-closed).
+        if self._is_quarantined(opp_id):
+            self._ledger.mark_suppressed(nid, "quarantined")
+            with self._lock:
+                self._diag["telegram_quarantined_count"] += 1
+                self._bump(symbol, "quarantined")
+            self._log_send(rec, "suppressed(quarantined)", 0)
+            return
+        status, detail, mid, retry_after = self._send_once(rec)
+        if status == "delivered":
+            self._ledger.mark_delivered(nid, mid)
+            with self._lock:
+                self._diag["telegram_send_count"] += 1
+                self._diag["telegram_last_success"] = time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                self._bump(symbol, "delivered")
+            self._log_send(rec, "delivered", int(rec.get("attempts", 0)))
+            return
+        attempts = int(rec.get("attempts", 1))
+        if status == "failed" or attempts >= _MAX_ATTEMPTS:
+            self._ledger.mark_failed(nid, detail)
+            self._record_failure(symbol)
+            self._log_send(rec, f"failed({detail})", attempts)
+            return
+        delay = retry_after if retry_after else self._backoff_seconds(attempts)
+        nxt = (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
+        self._ledger.mark_retry(nid, detail, nxt)
+        if "ambiguous" in detail:
+            with self._lock:
+                self._diag["telegram_uncertain_count"] += 1
+            self._log_send(rec, f"uncertain({detail})", attempts)
+        else:
+            self._log_send(rec, f"retry({detail})", attempts)
+
+    def _send_once(self, item: dict):
+        """One HTTP attempt (rate-limited). -> (status, detail, msg_id, retry_after).
+
+        A non-2xx or ambiguous outcome is NEVER reported as delivered.
+        """
+        text = item.get("text", "")
+        now = time.monotonic()
+        elapsed = now - self._last_send_time
+        if elapsed < self._min_send_interval:
+            time.sleep(self._min_send_interval - elapsed)
+        self._log_send(item, "attempt", int(item.get("attempts", 0)))
+        try:
+            body = _send_telegram_message(self._token, self._chat_id, text)
+            self._last_send_time = time.monotonic()
+            mid = None
+            if isinstance(body, dict):
+                mid = str((body.get("result") or {}).get("message_id", "")) or None
+            return ("delivered", "ok", mid, None)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429:
+                retry_after = _BASE_BACKOFF_S
+                try:
+                    ra = json.loads(exc.read()).get("parameters", {}).get("retry_after")
+                    if ra is not None:
+                        retry_after = min(float(ra), _MAX_RETRY_AFTER_S)
+                except Exception:
+                    pass
+                return ("retry", f"http 429 retry_after={retry_after:g}", None, retry_after)
+            return ("failed", f"http {exc.code}", None, None)
+        except (TimeoutError, socket.timeout):
+            return ("retry", "ambiguous(timeout)", None, None)
+        except urllib.error.URLError as exc:
+            reason = getattr(exc, "reason", None)
+            if isinstance(reason, (socket.gaierror, ConnectionRefusedError)):
+                return ("retry", "pre-delivery", None, None)
+            return ("retry", "ambiguous(urlerror)", None, None)
+        except Exception:
+            return ("retry", "ambiguous(error)", None, None)
 
     def _log_send(self, item: dict, outcome: str, attempt: int = 0) -> None:
         """Secret-safe structured log line for every send attempt/outcome."""

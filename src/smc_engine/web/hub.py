@@ -48,6 +48,7 @@ from ..opportunity import OpportunityEngine, OpportunityRepository
 from ..opportunity import evaluator as opp_evaluator
 from ..opportunity.funnel import FunnelRepository
 from ..telegram import TelegramNotifier
+from ..notification_ledger import NotificationLedger
 
 TIMEFRAMES = {
     "M1": 1, "M5": 5, "M15": 15, "M30": 30,
@@ -447,7 +448,8 @@ class EngineHub:
                 _tg_path = _cand
                 break
         self.telegram = TelegramNotifier(
-            _tg_path, quarantine_check=self.opportunities.repo.is_quarantined)
+            _tg_path, quarantine_check=self.opportunities.repo.is_quarantined,
+            ledger=NotificationLedger(db_path))
 
     # ---------- account identity gate ----------
     def _account_identity(self) -> dict:
