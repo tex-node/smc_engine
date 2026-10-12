@@ -22,7 +22,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from typing import Optional
+from typing import Callable, Optional
 
 _log = logging.getLogger(__name__)
 
@@ -212,6 +212,7 @@ class TelegramNotifier:
         cred_path: str,
         enabled_kinds: Optional[frozenset] = None,
         min_send_interval: float = _MIN_SEND_INTERVAL_S,
+        quarantine_check: Optional[Callable[[str], bool]] = None,
     ):
         self._enabled = False
         self._configured = False
@@ -221,6 +222,9 @@ class TelegramNotifier:
             enabled_kinds if enabled_kinds is not None else _DEFAULT_ENABLED_KINDS
         )
         self._min_send_interval = min_send_interval
+        # Authoritative persistent quarantine predicate (opportunity_id -> bool).
+        # Consulted immediately before every outbound send; see _is_quarantined.
+        self._quarantine_check = quarantine_check
         self._queue: queue.Queue = queue.Queue(maxsize=_MAX_QUEUE_SIZE)
         self._stop = threading.Event()
         self._last_send_time = 0.0
@@ -235,6 +239,7 @@ class TelegramNotifier:
             "telegram_deduplicated_count": 0,
             "telegram_uncertain_count": 0,
             "telegram_dropped_count": 0,
+            "telegram_quarantined_count": 0,
         }
         # Per-symbol scan->delivery counters so a symbol with no eligible event
         # can be distinguished from a symbol whose event never reached delivery.
@@ -356,6 +361,21 @@ class TelegramNotifier:
             item.get("event_id", ""), outcome, attempt,
         )
 
+    def _is_quarantined(self, opp_id: str) -> bool:
+        """Authoritative, persistent quarantine check at the send boundary.
+
+        Fail-closed: returns True (do not deliver) when the state cannot be
+        established. A storage error must never look like 'not quarantined'.
+        """
+        if not opp_id or self._quarantine_check is None:
+            return False
+        try:
+            return bool(self._quarantine_check(opp_id))
+        except Exception:
+            _log.warning(
+                "telegram quarantine check failed for %s; suppressing send", opp_id)
+            return True
+
     def _send_with_retry(self, item: dict) -> None:
         """Send one message with rate limiting and bounded exponential backoff.
 
@@ -377,6 +397,15 @@ class TelegramNotifier:
             if elapsed < self._min_send_interval:
                 time.sleep(self._min_send_interval - elapsed)
 
+            # FINAL quarantine eligibility check immediately before the send,
+            # using the authoritative persistent state (a queued event is still
+            # suppressed if the opportunity was quarantined after enqueue).
+            if self._is_quarantined(item.get("opp_id", "")):
+                with self._lock:
+                    self._diag["telegram_quarantined_count"] += 1
+                    self._bump(symbol, "quarantined")
+                self._log_send(item, "suppressed(quarantined)", attempt)
+                return
             self._log_send(item, "attempt", attempt)
             try:
                 _send_telegram_message(self._token, self._chat_id, text)

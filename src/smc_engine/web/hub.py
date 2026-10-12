@@ -446,7 +446,8 @@ class EngineHub:
             if os.path.isfile(_cand):
                 _tg_path = _cand
                 break
-        self.telegram = TelegramNotifier(_tg_path)
+        self.telegram = TelegramNotifier(
+            _tg_path, quarantine_check=self.opportunities.repo.is_quarantined)
 
     # ---------- account identity gate ----------
     def _account_identity(self) -> dict:
@@ -1526,7 +1527,20 @@ class EngineHub:
 
     def _dispatch_opportunity_events(self, res: dict) -> None:
         """Backend alert dispatch — runs regardless of any UI connection."""
+        try:
+            quarantined = self.opportunities.repo.quarantined_ids()
+        except Exception:
+            # Fail closed: if quarantine state cannot be established, never treat
+            # it as "not quarantined". Skip this cycle's dispatch (the notifier's
+            # send-boundary check is independently fail-closed).
+            import logging
+            logging.getLogger(__name__).warning(
+                "quarantine state unavailable; skipping opportunity dispatch")
+            return
         for ev in res.get("events", []):
+            # A quarantined opportunity never produces alerts or notifications.
+            if ev.get("opportunity_id") in quarantined:
+                continue
             try:
                 self.web.add_alert(ev.get("symbol", "?"), "causal", ev.get("kind", "OPPORTUNITY"),
                                    ev.get("message", ""), level="OPPORTUNITY")

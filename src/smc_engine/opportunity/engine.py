@@ -8,6 +8,7 @@ events. TradeSetup creation remains owned by the existing causal path.
 """
 from __future__ import annotations
 
+import logging
 import threading
 from typing import Optional
 
@@ -22,8 +23,7 @@ from .models import (TERMINAL_STATES, BlockReason, EntryPathway, Opportunity,
                      OpportunityType as Ty, OpportunityWindows,
                      canonical_opportunity_key, opportunity_id_from_key,
                      _ns)
-from .repository import (OpportunityRepository, OpportunityIdentityConflict,
-                         TerminalStateImmutable)
+from .repository import OpportunityInvariantError, OpportunityRepository
 from .state_machine import assert_transition, is_terminal
 
 
@@ -134,9 +134,10 @@ class OpportunityEngine:
             self.repo.upsert(opp)
             self.repo.record_state_change(opp.opportunity_id, St.IDLE.value,
                                           opp.state, "armed", anchor_kind)
-        except (OpportunityIdentityConflict, TerminalStateImmutable) as exc:
-            # Authoritative safety net: an identity collision or an attempt to
-            # reactivate a terminal row is refused and surfaced, never applied.
+        except OpportunityInvariantError as exc:
+            # Authoritative safety net: an identity collision, a quarantined
+            # row, or an attempt to reactivate a terminal row is refused and
+            # surfaced, never applied.
             result["blocked"].append({
                 "key": key, "reason": "identity_invariant",
                 "block": BlockReason.DUPLICATE.value, "detail": str(exc)})
@@ -643,8 +644,14 @@ class OpportunityEngine:
             return
         for opp in self.repo.query(symbol=symbol, active_only=True, limit=1000):
             if opp.expires_at and pd.Timestamp(opp.expires_at) < pd.Timestamp(now):
-                self._terminate(opp, St.EXPIRED, BlockReason.EXPIRED_TTL.value,
-                                "TTL elapsed", now, result)
+                try:
+                    self._terminate(opp, St.EXPIRED, BlockReason.EXPIRED_TTL.value,
+                                    "TTL elapsed", now, result)
+                except OpportunityInvariantError:
+                    # An inconsistent/quarantined row must never abort expiry of
+                    # the other opportunities for this symbol.
+                    logging.getLogger(__name__).warning(
+                        "opportunity expiry refused for %s (isolated)", opp.opportunity_id)
 
     def _terminate(self, opp: Opportunity, state: St, reason: str, detail: str,
                    now, result: dict, event_kind: Optional[str] = None) -> None:
@@ -768,6 +775,8 @@ class OpportunityEngine:
         d["windows"] = self.windows.as_dict()
         d["pathways"] = list(self.pathways)
         d["arbitration"] = self.arbiter.diagnostics()
+        d["quarantined_count"] = self.repo.quarantined_count()
+        d["quarantine"] = self.repo.quarantine_diagnostics()
         return d
 
     def audit(self, symbol: str) -> dict:

@@ -49,6 +49,10 @@ class TerminalStateImmutable(OpportunityInvariantError):
     """A terminal opportunity may not be silently reactivated via a write."""
 
 
+class QuarantinedOpportunity(OpportunityInvariantError):
+    """A quarantined opportunity may not be written, re-armed, or transitioned."""
+
+
 class OpportunityRepository:
     def __init__(self, db_path: str):
         self._conn = sqlite3.connect(db_path, check_same_thread=False, timeout=10.0)
@@ -84,6 +88,12 @@ class OpportunityRepository:
           kind TEXT NOT NULL,
           message TEXT,
           UNIQUE(opportunity_id, transition, evidence_key)
+        );
+        CREATE TABLE IF NOT EXISTS opportunity_quarantine(
+          opportunity_id TEXT PRIMARY KEY,
+          reason TEXT NOT NULL,
+          at TEXT NOT NULL,
+          evidence_json TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_opp_symbol_state
           ON opportunities(symbol_norm, state);
@@ -121,9 +131,14 @@ class OpportunityRepository:
 
     def _assert_identity_invariants(self, opp: Opportunity) -> None:
         """Enforce, at the authoritative write boundary:
-          1. an opportunity_id refers to exactly one canonical identity;
-          2. a terminal row cannot be silently changed to another state.
+          1. a quarantined opportunity is never written;
+          2. an opportunity_id refers to exactly one canonical identity;
+          3. a terminal row cannot be silently changed to another state.
         """
+        if self._is_quarantined(opp.opportunity_id):
+            self._record_identity_diag("QUARANTINED", opp.opportunity_id, opp.canonical_key)
+            raise QuarantinedOpportunity(
+                f"opportunity {opp.opportunity_id!r} is quarantined; write refused")
         existing = self._row_identity(opp.opportunity_id)
         if existing is None:
             return
@@ -152,6 +167,67 @@ class OpportunityRepository:
     def reset_identity_diagnostics(self) -> None:
         with self._lock:
             self._identity_diags = []
+
+    # ---------- quarantine (opportunity-specific, auditable) ----------
+    @serialized_write
+    def quarantine(self, opportunity_id: str, reason: str,
+                   evidence: Optional[dict] = None) -> bool:
+        """Idempotently mark ONE opportunity quarantined. True if newly added.
+
+        Quarantined opportunities are excluded from active scans and refused at
+        the write boundary; the row, its events and its history are untouched.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                """INSERT OR IGNORE INTO opportunity_quarantine
+                   (opportunity_id, reason, at, evidence_json) VALUES(?,?,?,?)""",
+                (opportunity_id, reason, _utcnow(),
+                 json.dumps(evidence or {}, default=str, sort_keys=True)))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    @serialized_write
+    def unquarantine(self, opportunity_id: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM opportunity_quarantine WHERE opportunity_id=?",
+                (opportunity_id,))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def _is_quarantined(self, opportunity_id: str) -> bool:
+        return self._conn.execute(
+            "SELECT 1 FROM opportunity_quarantine WHERE opportunity_id=?",
+            (opportunity_id,)).fetchone() is not None
+
+    @_serialized_read
+    def is_quarantined(self, opportunity_id: str) -> bool:
+        return self._is_quarantined(opportunity_id)
+
+    @_serialized_read
+    def quarantined_ids(self) -> set:
+        return {r[0] for r in self._conn.execute(
+            "SELECT opportunity_id FROM opportunity_quarantine")}
+
+    @_serialized_read
+    def quarantine_diagnostics(self) -> list:
+        rows = self._conn.execute(
+            "SELECT opportunity_id, reason, at, evidence_json "
+            "FROM opportunity_quarantine ORDER BY at, opportunity_id").fetchall()
+        out = []
+        for oid, reason, at, ev in rows:
+            try:
+                evidence = json.loads(ev) if ev else {}
+            except (TypeError, ValueError):
+                evidence = {}
+            out.append({"opportunity_id": oid, "reason": reason, "at": at,
+                        "evidence": evidence})
+        return out
+
+    @_serialized_read
+    def quarantined_count(self) -> int:
+        return self._conn.execute(
+            "SELECT COUNT(*) FROM opportunity_quarantine").fetchone()[0]
 
     # ---------- write ----------
     @serialized_write
@@ -308,7 +384,9 @@ class OpportunityRepository:
             args.append(opportunity_type)
         if active_only:
             sql += (" AND state NOT IN "
-                    "('INVALIDATED','EXPIRED','TERMINAL','ENTRY_TRIGGERED','SUPERSEDED')")
+                    "('INVALIDATED','EXPIRED','TERMINAL','ENTRY_TRIGGERED','SUPERSEDED')"
+                    " AND opportunity_id NOT IN "
+                    "(SELECT opportunity_id FROM opportunity_quarantine)")
         sql += " ORDER BY updated_at DESC LIMIT ?"
         args.append(int(limit))
         out = []
@@ -334,6 +412,8 @@ class OpportunityRepository:
         sql = ("SELECT payload_json FROM opportunities WHERE symbol_norm=? "
                "AND state NOT IN "
                "('INVALIDATED','EXPIRED','TERMINAL','ENTRY_TRIGGERED','SUPERSEDED') "
+               "AND opportunity_id NOT IN "
+               "(SELECT opportunity_id FROM opportunity_quarantine) "
                "ORDER BY updated_at DESC LIMIT 200")
         out = []
         for (payload,) in self._conn.execute(sql, (symbol_norm,)).fetchall():
