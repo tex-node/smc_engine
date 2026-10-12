@@ -416,9 +416,10 @@ class EngineHub:
         self._stop = threading.Event()
         self._history_failures = 0
         # ---------- opportunity layer (non-executing; UI-independent) ----------
-        self.opportunities = OpportunityEngine(OpportunityRepository(db_path),
-                                               config=MultiTimeframeConfig())
         self.funnel = FunnelRepository(db_path)
+        self.opportunities = OpportunityEngine(OpportunityRepository(db_path),
+                                               config=MultiTimeframeConfig(),
+                                               funnel_repo=self.funnel)
         # Persisted opportunity state recovered at startup (authoritative across
         # restarts). Surfaced via runtime_info().
         self._recovery_counts_at_startup = self.opportunities.repo.state_counts()

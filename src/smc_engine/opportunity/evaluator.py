@@ -217,3 +217,43 @@ def audit_classification(view: CausalView, active_states: list[str],
     if risk_status in ("RISK_REJECTED", "RISK_PORTFOLIO_REJECTED"):
         return BlockReason.RISK_BLOCKED.value
     return BlockReason.STRUCTURAL_CONTEXT_ONLY.value
+
+
+def htf_bias(view: CausalView) -> dict:
+    """Owner-approved HTF bias (Varis SMC), read-only.
+
+    Primary = direction of the most recent H4 Break of Structure, reusing the
+    authoritative H4 structure already in the view (`view.breaks`, produced by
+    `structure.detect_structure_breaks` in `build_view`). A D1 POI direction
+    (`view.d1_pois`, from `poi.active_unmitigated_pois`) must not contradict it.
+
+    Rules:
+      * bias = h4_bos_direction when present and (no D1 POI, or every D1 POI
+        direction agrees);
+      * bias = UNKNOWN when h4_bos_direction is absent;
+      * bias = UNKNOWN when an H4 BOS exists but a D1 POI direction disagrees.
+    Silence (UNKNOWN) is intentional: the gate rejects promotion.
+    """
+    bos = [b for b in (getattr(view, "breaks", None) or [])
+           if b.type is StructureEventType.BOS]
+    bos.sort(key=lambda b: pd.Timestamp(b.candle_time))
+    h4_dir = bos[-1].direction.value if bos else None
+    h4_time = bos[-1].candle_time if bos else None
+
+    d1_dirs: list[str] = []
+    latest = None
+    for p in (getattr(view, "d1_pois", None) or []):
+        d = p.direction.value if hasattr(p.direction, "value") else str(p.direction)
+        d1_dirs.append(d)
+        if latest is None or pd.Timestamp(p.created_time) > pd.Timestamp(latest[0]):
+            latest = (p.created_time, d)
+    d1_dir = latest[1] if latest else None
+
+    if h4_dir is None:
+        bias = "UNKNOWN"
+    elif d1_dirs and any(d != h4_dir for d in d1_dirs):
+        bias = "UNKNOWN"
+    else:
+        bias = h4_dir
+    return {"h4_bos_direction": h4_dir, "h4_bos_time": h4_time,
+            "d1_poi_direction": d1_dir, "bias": bias}

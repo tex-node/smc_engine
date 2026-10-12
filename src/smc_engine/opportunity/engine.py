@@ -14,6 +14,7 @@ from typing import Optional
 
 import pandas as pd
 
+from ..causal import FunnelEvent
 from ..models import Direction, StructureEventType
 from ..strategy import MultiTimeframeConfig
 from . import evaluator
@@ -39,8 +40,10 @@ class OpportunityEngine:
     def __init__(self, repository: OpportunityRepository,
                  windows: Optional[OpportunityWindows] = None,
                  config: Optional[MultiTimeframeConfig] = None,
-                 pathways: Optional[list[str]] = None):
+                 pathways: Optional[list[str]] = None,
+                 funnel_repo: Optional[object] = None):
         self.repo = repository
+        self._funnel_repo = funnel_repo
         self.windows = windows or OpportunityWindows()
         self.config = config or MultiTimeframeConfig()
         # Enabled entry pathways (opportunity-generation policy, NOT an
@@ -107,7 +110,8 @@ class OpportunityEngine:
     def _arm(self, key: str, symbol: str, direction: str, otype: str,
              anchor_kind: str, anchor_time, anchor_level: float,
              evidence: dict, pathway: str, now, result: dict,
-             initial_state: str = St.OPPORTUNITY_ARMED.value) -> Optional[Opportunity]:
+             initial_state: str = St.OPPORTUNITY_ARMED.value,
+             bias: Optional[dict] = None) -> Optional[Opportunity]:
         opp = Opportunity(
             opportunity_id=opportunity_id_from_key(key), canonical_key=key,
             symbol=symbol, direction=direction, opportunity_type=otype,
@@ -130,6 +134,12 @@ class OpportunityEngine:
             opp.bos_time = _iso(anchor_time)
             opp.expires_at = _iso(pd.Timestamp(anchor_time) + pd.Timedelta(
                 minutes=15 * self.windows.continuation_bos_to_poi_bars))
+        if bias:
+            # HTF context captured at arm time (Varis SMC): D1 POI direction,
+            # most-recent H4 BOS direction, and the resolved overall bias.
+            opp.d1_context = bias.get("d1_poi_direction") or ""
+            opp.h4_context = bias.get("h4_bos_direction") or ""
+            opp.m15_context = bias.get("bias") or ""
         try:
             self.repo.upsert(opp)
             self.repo.record_state_change(opp.opportunity_id, St.IDLE.value,
@@ -159,6 +169,7 @@ class OpportunityEngine:
 
     def _discover_reversal(self, symbol: str, view: evaluator.CausalView,
                            now, result: dict) -> None:
+        bias = evaluator.htf_bias(view)
         for sweep in view.sweeps:
             age = evaluator._bars_since(sweep.candle_time, view.m15_last_time)
             csd = view.csd_by_sweep.get(sweep.id)
@@ -215,25 +226,25 @@ class OpportunityEngine:
                 opp = self._arm(key, symbol, direction.value, Ty.REVERSAL.value, "SWEEP",
                                 sweep.candle_time, sweep.swept_level, evidence,
                                 self._reversal_pathway(), now, result,
-                                initial_state=initial)
+                                initial_state=initial, bias=bias)
                 if opp is None:
                     continue
                 opp.csd_evidence = {"id": csd.id, "direction": csd.direction.value,
                                     "level": float(csd.level), "time": _iso(csd.candle_time)}
                 opp.csd_time = _iso(csd.candle_time)
-                opp.h4_context = csd.id
                 opp.expires_at = _iso(pd.Timestamp(csd.candle_time) + pd.Timedelta(
                     minutes=15 * self.windows.csd_to_poi_bars))
                 self.repo.upsert(opp)
             else:
                 self._arm(key, symbol, direction.value, Ty.REVERSAL.value, "SWEEP",
                           sweep.candle_time, sweep.swept_level, evidence,
-                          self._reversal_pathway(), now, result)
+                          self._reversal_pathway(), now, result, bias=bias)
 
     def _discover_continuation(self, symbol: str, view: evaluator.CausalView,
                                now, result: dict) -> None:
         if EntryPathway.CONTINUATION.value not in self.pathways:
             return
+        bias = evaluator.htf_bias(view)
         for bos in view.breaks:
             if bos.type is not StructureEventType.BOS:
                 continue
@@ -269,7 +280,7 @@ class OpportunityEngine:
                 continue
             self._arm(key, symbol, bos.direction.value, Ty.CONTINUATION.value, "BOS",
                       bos.candle_time, bos.level, evidence,
-                      EntryPathway.CONTINUATION.value, now, result)
+                      EntryPathway.CONTINUATION.value, now, result, bias=bias)
 
     # -------------------------------------------------------------- advancing
     def _advance_symbol(self, symbol: str, view: evaluator.CausalView,
@@ -386,7 +397,6 @@ class OpportunityEngine:
             opp.csd_evidence = {"id": csd.id, "direction": csd.direction.value,
                                 "level": float(csd.level), "time": _iso(csd.candle_time)}
             opp.csd_time = _iso(csd.candle_time)
-            opp.h4_context = csd.id
             opp.expires_at = _iso(pd.Timestamp(csd.candle_time) + pd.Timedelta(
                 minutes=15 * self.windows.csd_to_poi_bars))
             self._transition(opp, St.WAITING_FOR_POI, BlockReason.WAITING_FOR_POI.value,
@@ -495,6 +505,21 @@ class OpportunityEngine:
         self._check_entry(opp, view, direction, now, result)
     def _to_ready(self, opp: Opportunity, view: evaluator.CausalView, now,
                   result: dict, reason: str) -> None:
+        # Varis SMC HTF-bias gate: READY requires agreement with the resolved
+        # HTF bias (most-recent H4 BOS direction; a D1 POI must not contradict).
+        # UNKNOWN bias never promotes (silence is correct). Enforced centrally
+        # so both CONTINUATION and REVERSAL pass through it.
+        bias = evaluator.htf_bias(view)
+        if bias["bias"] == "UNKNOWN":
+            self._refuse_readiness(opp, "NO_HTF_CONTEXT",
+                                   "HTF bias UNKNOWN (no H4 BOS / conflicting D1 POI)",
+                                   now, result)
+            return
+        if bias["bias"] != opp.direction:
+            self._refuse_readiness(opp, "HTF_BIAS_MISMATCH",
+                                   f"setup {opp.direction} vs HTF bias {bias['bias']}",
+                                   now, result)
+            return
         if opp.state != St.READY_FOR_MITIGATION.value:
             self._transition(opp, St.READY_FOR_MITIGATION,
                              BlockReason.READY_FOR_MITIGATION.value, reason, now, result,
@@ -513,6 +538,41 @@ class OpportunityEngine:
         opp.blocker = ""
         opp.next_expected = "POI mitigation / entry"
         self.repo.upsert(opp)
+
+    def _refuse_readiness(self, opp: Opportunity, reason: str, detail: str,
+                          now, result: dict) -> None:
+        """Refuse READY when the HTF-bias precondition is unmet.
+
+        Uses the existing state machine: INVALIDATED is reachable from
+        OPPORTUNITY_ARMED / WAITING_FOR_POI / WAITING_FOR_IDM (state_machine.py),
+        so no new state is invented. History/events are appended; nothing is
+        deleted or rewritten.
+        """
+        self._terminate(opp, St.INVALIDATED, reason, detail, now, result)
+        result["blocked"].append({
+            "key": opp.canonical_key, "reason": reason.lower(),
+            "block": BlockReason.STRUCTURAL_INVALIDATION.value,
+            "opportunity_id": opp.opportunity_id})
+        self._emit_htf_funnel(opp, reason)
+
+    def _emit_htf_funnel(self, opp: Opportunity, reason: str) -> None:
+        """Persist a pre-arm funnel event so the funnel shows WHY readiness was
+        refused (NO_HTF_CONTEXT / HTF_BIAS_MISMATCH — previously dead enums)."""
+        if self._funnel_repo is None:
+            return
+        try:
+            ev = FunnelEvent(
+                symbol=opp.symbol,
+                scan_timestamp=_iso(_now()),
+                market_event_timestamp=str(opp.bos_time or opp.sweep_time
+                                           or opp.created_at or ""),
+                stage="HTF_CONTEXT", reason=reason, direction=opp.direction,
+                causal_anchor_ref=opp.canonical_key, evidence_timestamp="",
+                config_fingerprint="")
+            self._funnel_repo.persist_events([ev])
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "HTF funnel emission failed for %s", opp.opportunity_id)
 
     def _check_entry(self, opp: Opportunity, view: evaluator.CausalView,
                      direction: Direction, now, result: dict) -> None:

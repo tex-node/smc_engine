@@ -102,12 +102,19 @@ def test_execution_ready_emitted_only_after_setup_promotion(tmp_path):
         stop_loss=101.5, take_profit=108.0, irl_swing_id="R",
         invalidation_level=101.5, risk_percent=1.0)
     cand = CausalCandidate(setup=setup, setup_time=setup.created_time, sweep=object(), csd=object())
+    # Phase B: READY now requires HTF-bias agreement (Varis SMC). Supply a
+    # matching BULLISH H4 BOS so the promotion precondition is satisfied; the
+    # business assertion (EXECUTION_READY only after promotion) is unchanged.
+    from src.smc_engine.models import StructureEvent, StructureEventType
+    bos = StructureEvent(id="BOS-TEST-BULL", type=StructureEventType.BOS,
+                         direction=Direction.BULLISH, level=104.0, candle_index=0,
+                         candle_time=pd.Timestamp("2026-01-25 00:00", tz="UTC"))
     view2 = evaluator.CausalView(symbol="GBPUSD", as_of=view.as_of,
                                  m15_frame=view.m15_frame, m15_last_time=view.m15_last_time,
                                  sweeps=view.sweeps, csd_by_sweep=view.csd_by_sweep,
                                  m15_obs=view.m15_obs, m15_fvgs=view.m15_fvgs,
                                  m15_swings=view.m15_swings, d1_pois=view.d1_pois,
-                                 idms=view.idms, candidates=[cand])
+                                 breaks=[bos], idms=view.idms, candidates=[cand])
     res = eng.observe("GBPUSD", view2)
     kinds = [e["kind"] for e in res["events"]]
     assert Ev.CONVERTED_TO_SETUP.value in kinds
