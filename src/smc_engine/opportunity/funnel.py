@@ -23,6 +23,7 @@ from ..web.dbwrite import serialized_read as _serialized_read
 class FunnelStage(str, Enum):
     D1_POI = "D1_POI"
     H4_SWEEP = "H4_SWEEP"
+    SWEEP_OF_IDM = "SWEEP_OF_IDM"
     H4_CSD = "H4_CSD"
     M15_OB = "M15_OB"
     M15_MITIGATION = "M15_MITIGATION"
@@ -45,6 +46,8 @@ class FunnelReason(str, Enum):
     NO_SWEEP = "NO_SWEEP"
     SWEEP_INVALID = "SWEEP_INVALID"
     SWEEP_WINDOW_EXPIRED = "SWEEP_WINDOW_EXPIRED"
+    # Step 2 Slice 1: no sweep of an IDM level found in the continuation window.
+    SWEEP_OF_IDM_MISSING = "SWEEP_OF_IDM_MISSING"
     # CSD stage
     NO_CSD = "NO_CSD"
     CSD_DIRECTION_MISMATCH = "CSD_DIRECTION_MISMATCH"

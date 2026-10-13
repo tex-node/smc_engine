@@ -37,6 +37,9 @@ class CausalView:
     m15_fvgs: list = field(default_factory=list)
     m15_swings: list = field(default_factory=list)
     idms: list = field(default_factory=list)
+    # M15 internal-liquidity sweeps (minor swings), matched against M15 IDM
+    # levels by sweep_of_idm(). Distinct from `sweeps` (H4 external liquidity).
+    m15_sweeps: list = field(default_factory=list)
     candidates: list = field(default_factory=list)      # raw CausalCandidate
     m15_frame: object = None                            # truncated M15 candles
     d1_last_time: object = None
@@ -106,6 +109,12 @@ def build_view(symbol: str, d1: pd.DataFrame, h4: pd.DataFrame, m15: pd.DataFram
     m15_swings = find_swings(m15v, config.m15_swing_left, config.m15_swing_right)
     idms = find_inducements(m15v, obs, m15_swings, config.m15_idm_window,
                             as_of=view.as_of)
+    # M15 internal-liquidity sweeps: the minor swings retail uses for stops.
+    # Matched level-vs-level against M15 IDM levels by sweep_of_idm(); a
+    # different primitive from the H4 external-liquidity sweeps in view.sweeps.
+    m15_pools = build_liquidity_pools(m15_swings)
+    m15_sweeps = detect_sweeps(m15v, m15_pools, config.m15_sweep_lookback,
+                               swings=m15_swings)
     fvgs = detect_fvgs(m15v)
     d1_pois = active_unmitigated_pois(
         d1v, lookback_bars=min(config.d1_poi_lookback, len(d1v)))
@@ -113,6 +122,7 @@ def build_view(symbol: str, d1: pd.DataFrame, h4: pd.DataFrame, m15: pd.DataFram
     view.h4_swings, view.sweeps, view.breaks = swings, sweeps, breaks
     view.csd_by_sweep = csd_by_sweep
     view.m15_obs, view.m15_fvgs, view.m15_swings, view.idms = obs, fvgs, m15_swings, idms
+    view.m15_sweeps = m15_sweeps
     view.d1_pois = d1_pois
     view.candidates = CausalMTFAnalyzer(symbol, config).analyze_at(
         d1v, h4v, m15v, as_of=view.as_of)
@@ -257,3 +267,72 @@ def htf_bias(view: CausalView) -> dict:
         bias = h4_dir
     return {"h4_bos_direction": h4_dir, "h4_bos_time": h4_time,
             "d1_poi_direction": d1_dir, "bias": bias}
+
+
+# Relative tolerance for matching a swept level to an IDM level. The sweep (H4)
+# and the IDM (M15) are detected on different timeframes, so equality is
+# proximity-based; 1e-4 (0.01%) is deliberately tight to avoid false matches.
+SWEEP_OF_IDM_REL_TOL = 1e-4
+
+
+def sweep_of_idm(view: CausalView, direction: Direction, bos_time,
+                 poi_time=None, rel_tol: float = SWEEP_OF_IDM_REL_TOL):
+    """Step 2 Slice 1 (Varis continuation precondition): sweep of IDM.
+
+    Within the continuation window, returns evidence for the first detected M15
+    sweep of an M15 IDM level, with causal ordering:
+
+      * ``sweep.candle_time`` strictly AFTER the arming ``bos_time``;
+      * ``sweep.candle_time`` at/before ``poi_time`` (the promoting POI) when
+        given — a sweep that post-dates the POI does not count;
+      * the sweep side implies ``direction`` (SELL_SIDE sweep -> BULLISH);
+      * ``abs(sweep.swept_level - idm.level) <= max(1e-9, rel_tol*|idm.level|)``
+        and ``idm.direction is direction``.
+
+    Both inputs are INTERNAL liquidity on M15 — the sweeps from ``view.m15_sweeps``
+    (detected from M15 swings) and the IDMs from ``view.idms`` (also M15 swings).
+    They are the same class of object (the minor swings retail uses for stops,
+    taken out before the real move), so a level match is meaningful. The H4
+    sweeps in ``view.sweeps`` are EXTERNAL liquidity (a different primitive — the
+    reversal anchor) and must NOT be used here: matching an H4 pool to an M15 IDM
+    level is a null operation.
+
+    Matching rule: LEVEL EQUALITY WITHIN A RELATIVE TOLERANCE (default 1e-4 =
+    0.01%, absolute floor 1e-9). Range overlap and source-swing identity are NOT
+    used: an IDM's source swing and a sweep's source swing are distinct
+    detections, so the only shared, comparable quantity is the price level.
+    Reuses the view's already-detected M15 sweeps (``structure.detect_sweeps``)
+    and IDMs (``execution_structure.find_inducements``); nothing is recomputed.
+
+    Returns ``{sweep_id, idm_id, swept_level, idm_level, sweep_time,
+    idm_order_block_id}`` for the first match (sweeps in candle order), else None.
+    """
+    if bos_time is None:
+        return None
+    bos_ts = pd.Timestamp(bos_time)
+    poi_ts = pd.Timestamp(poi_time) if poi_time is not None else None
+    want_side = (LiquiditySide.SELL_SIDE if direction is Direction.BULLISH
+                 else LiquiditySide.BUY_SIDE)
+    for sweep in sorted((getattr(view, "m15_sweeps", None) or []),
+                        key=lambda s: pd.Timestamp(s.candle_time)):
+        st = pd.Timestamp(sweep.candle_time)
+        if st <= bos_ts:
+            continue                        # must occur after the arming BOS
+        if poi_ts is not None and st > poi_ts:
+            continue                        # must not post-date the promoting POI
+        if sweep.side is not want_side:
+            continue
+        for idm in (getattr(view, "idms", None) or []):
+            if idm.direction is not direction:
+                continue
+            tol = max(1e-9, rel_tol * abs(float(idm.level)))
+            if abs(float(sweep.swept_level) - float(idm.level)) <= tol:
+                return {
+                    "sweep_id": sweep.id,
+                    "idm_id": idm.id,
+                    "swept_level": float(sweep.swept_level),
+                    "idm_level": float(idm.level),
+                    "sweep_time": st,
+                    "idm_order_block_id": getattr(idm, "order_block_id", ""),
+                }
+    return None

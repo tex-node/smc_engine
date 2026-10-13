@@ -77,6 +77,8 @@ class BlockReason(str, Enum):
     STRUCTURAL_CONTEXT_ONLY = "STRUCTURAL_CONTEXT_ONLY"
     SWEEP_ARMED = "SWEEP_ARMED"
     SWEEP_EXPIRED = "SWEEP_EXPIRED"
+    # Step 2 Slice 1: continuation readiness requires a sweep of an IDM level.
+    SWEEP_OF_IDM_MISSING = "SWEEP_OF_IDM_MISSING"
     WAITING_FOR_CSD = "WAITING_FOR_CSD"
     CSD_NOT_FOUND = "CSD_NOT_FOUND"
     CSD_CONFIRMED = "CSD_CONFIRMED"
@@ -183,6 +185,11 @@ class Opportunity:
     bos_time: object = None
     poi_time: object = None
     idm_time: object = None
+    # Step 2 Slice 1 (sweep-of-IDM precondition). Market-event time of the
+    # sweep that took out an IDM level, and the matching IDM reference.
+    # Separate from `sweep_time` (the REVERSAL stream's sweep anchor).
+    idm_sweep_time: object = None
+    idm_sweep_reference: str = ""
     observed_time: object = None
     poi_candidates: list = field(default_factory=list)   # list[dict]
     selected_poi: str = ""

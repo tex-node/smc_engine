@@ -19,6 +19,7 @@ from ..models import Direction, StructureEventType
 from ..strategy import MultiTimeframeConfig
 from . import evaluator
 from .arbiter import ArbiterDecision, OpportunityArbiter, thesis_strength
+from .funnel import FunnelReason, FunnelStage
 from .models import (TERMINAL_STATES, BlockReason, EntryPathway, Opportunity,
                      OpportunityEventKind as Ev, OpportunityState as St,
                      OpportunityType as Ty, OpportunityWindows,
@@ -501,10 +502,11 @@ class OpportunityEngine:
             self.repo.upsert(opp)
             self._emit(opp, Ev.POI_FOUND.value, f"POI:{best.poi_id}",
                        f"{opp.symbol} continuation POI {best.poi_id}", result)
-        self._to_ready(opp, view, now, result, "continuation: BOS+POI")
+        self._to_ready(opp, view, now, result, "continuation: BOS+POI",
+                       continuation=True)
         self._check_entry(opp, view, direction, now, result)
     def _to_ready(self, opp: Opportunity, view: evaluator.CausalView, now,
-                  result: dict, reason: str) -> None:
+                  result: dict, reason: str, continuation: bool = False) -> None:
         # Varis SMC HTF-bias gate: READY requires agreement with the resolved
         # HTF bias (most-recent H4 BOS direction; a D1 POI must not contradict).
         # UNKNOWN bias never promotes (silence is correct). Enforced centrally
@@ -520,6 +522,25 @@ class OpportunityEngine:
                                    f"setup {opp.direction} vs HTF bias {bias['bias']}",
                                    now, result)
             return
+        # Step 2 Slice 1: the CONTINUATION stream additionally requires a sweep
+        # of an M15 IDM level (internal liquidity) after the arming BOS and at or
+        # before the promoting POI. Ordering is bias -> sweep-of-IDM; the
+        # REVERSAL stream is unaffected. A refusal does NOT terminate the
+        # opportunity — it stays in its current non-READY state, blocked.
+        if continuation:
+            bos_time = opp.bos_time or (opp.bos_evidence or {}).get("time")
+            evidence = evaluator.sweep_of_idm(
+                view, Direction(opp.direction), bos_time,
+                poi_time=self._poi_anchor_time(opp))
+            if evidence is None:
+                opp.blocker = BlockReason.SWEEP_OF_IDM_MISSING.value
+                opp.next_expected = ("M15 sweep of an IDM level (internal "
+                                     "liquidity) after BOS and before POI")
+                self.repo.upsert(opp)
+                self._emit_sweep_of_idm_funnel(opp)
+                return
+            opp.idm_sweep_time = _iso(evidence["sweep_time"])
+            opp.idm_sweep_reference = evidence["sweep_id"]
         if opp.state != St.READY_FOR_MITIGATION.value:
             self._transition(opp, St.READY_FOR_MITIGATION,
                              BlockReason.READY_FOR_MITIGATION.value, reason, now, result,
@@ -573,6 +594,27 @@ class OpportunityEngine:
         except Exception:
             logging.getLogger(__name__).exception(
                 "HTF funnel emission failed for %s", opp.opportunity_id)
+
+    def _emit_sweep_of_idm_funnel(self, opp: Opportunity) -> None:
+        """Persist a funnel event explaining a CONTINUATION readiness refusal
+        caused by a missing sweep of an M15 IDM level (Step 2 Slice 1)."""
+        if self._funnel_repo is None:
+            return
+        try:
+            ev = FunnelEvent(
+                symbol=opp.symbol,
+                scan_timestamp=_iso(_now()),
+                market_event_timestamp=str(opp.bos_time or opp.created_at or ""),
+                stage=FunnelStage.SWEEP_OF_IDM.value,
+                reason=FunnelReason.SWEEP_OF_IDM_MISSING.value,
+                direction=opp.direction,
+                causal_anchor_ref=opp.canonical_key,
+                evidence_timestamp="",
+                config_fingerprint="")
+            self._funnel_repo.persist_events([ev])
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "sweep-of-IDM funnel emission failed for %s", opp.opportunity_id)
 
     def _check_entry(self, opp: Opportunity, view: evaluator.CausalView,
                      direction: Direction, now, result: dict) -> None:

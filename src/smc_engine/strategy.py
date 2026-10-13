@@ -23,6 +23,7 @@ class MultiTimeframeConfig:
     h4_csd_window: int = 6
     m15_swing_left: int = 2
     m15_swing_right: int = 2
+    m15_sweep_lookback: int = 20
     m15_displacement_atr: float = 1.5
     m15_atr_period: int = 14
     m15_ob_search_back: int = 20
