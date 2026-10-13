@@ -82,7 +82,8 @@ def _engine(tmp_path, funnel_repo=None):
 
 
 def _promote(eng, opp, view):
-    eng._to_ready(opp, view, NOW, _res(), "test", continuation=True)
+    # No flag: the gate activates from the opportunity's own CONTINUATION type.
+    eng._to_ready(opp, view, NOW, _res(), "test")
 
 
 # ── 1. valid sweep-of-IDM promotes ───────────────────────────────────────────
@@ -236,13 +237,38 @@ def test_refusal_emits_sweep_of_idm_funnel(tmp_path):
 
 # ── 7. REVERSAL path unaffected ──────────────────────────────────────────────
 
-def test_reversal_path_is_unaffected(tmp_path):
+def test_continuation_is_gated_directly_with_no_flag(tmp_path):
+    """The gate activates from the opportunity's OWN type: a direct _to_ready
+    call on a CONTINUATION opportunity is gated with no caller flag."""
+    eng, repo = _engine(tmp_path)
+    opp = _opp("BULLISH")                       # opportunity_type = CONTINUATION
+    repo.upsert(opp)
+    view = _view(Direction.BULLISH, m15_sweeps=[], idms=[_idm(Direction.BULLISH)])
+    eng._to_ready(opp, view, NOW, _res(), "test")
+    row = repo.get(opp.opportunity_id)
+    assert row.state != St.READY_FOR_MITIGATION.value
+    assert row.blocker == BlockReason.SWEEP_OF_IDM_MISSING.value
+
+
+def test_reversal_path_is_not_gated_by_sweep_of_idm(tmp_path):
     eng, repo = _engine(tmp_path)
     opp = _opp("BULLISH", otype=Ty.REVERSAL.value)
     repo.upsert(opp)
     view = _view(Direction.BULLISH, m15_sweeps=[], idms=[])
-    eng._to_ready(opp, view, NOW, _res(), "test")       # continuation defaults False
+    eng._to_ready(opp, view, NOW, _res(), "test")   # REVERSAL: bias gate only
     assert repo.get(opp.opportunity_id).state == St.READY_FOR_MITIGATION.value
+
+
+def test_unrecognised_stream_fails_closed(tmp_path):
+    """A stream that is neither REVERSAL nor CONTINUATION is never promoted."""
+    eng, repo = _engine(tmp_path)
+    opp = _opp("BULLISH", otype=Ty.PULLBACK.value)
+    repo.upsert(opp)
+    view = _view(Direction.BULLISH, m15_sweeps=[], idms=[])
+    eng._to_ready(opp, view, NOW, _res(), "test")
+    row = repo.get(opp.opportunity_id)
+    assert row.state != St.READY_FOR_MITIGATION.value
+    assert row.blocker == BlockReason.STRUCTURAL_INVALIDATION.value
 
 
 # ── 8. view exposes M15 sweeps ───────────────────────────────────────────────

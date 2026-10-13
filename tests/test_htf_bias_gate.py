@@ -31,7 +31,10 @@ def _view(breaks=(), d1_pois=()):
     return SimpleNamespace(breaks=list(breaks), d1_pois=list(d1_pois))
 
 
-def _opp(direction="BEARISH", otype=Ty.CONTINUATION.value, state=St.OPPORTUNITY_ARMED.value):
+def _opp(direction="BEARISH", otype=Ty.REVERSAL.value, state=St.OPPORTUNITY_ARMED.value):
+    # REVERSAL: these tests exercise the HTF-bias gate in isolation. A
+    # CONTINUATION opportunity would additionally require a sweep of an M15 IDM
+    # level (Step 2 Slice 1) — covered separately by tests/test_sweep_of_idm.py.
     anchor_kind = "BOS" if otype == Ty.CONTINUATION.value else "SWEEP"
     k = canonical_opportunity_key("EURUSD", direction, otype, anchor_kind,
                                   pd.Timestamp("2026-10-12 12:00", tz="UTC"), 1.1)

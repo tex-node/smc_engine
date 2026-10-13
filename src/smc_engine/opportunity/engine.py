@@ -502,11 +502,10 @@ class OpportunityEngine:
             self.repo.upsert(opp)
             self._emit(opp, Ev.POI_FOUND.value, f"POI:{best.poi_id}",
                        f"{opp.symbol} continuation POI {best.poi_id}", result)
-        self._to_ready(opp, view, now, result, "continuation: BOS+POI",
-                       continuation=True)
+        self._to_ready(opp, view, now, result, "continuation: BOS+POI")
         self._check_entry(opp, view, direction, now, result)
     def _to_ready(self, opp: Opportunity, view: evaluator.CausalView, now,
-                  result: dict, reason: str, continuation: bool = False) -> None:
+                  result: dict, reason: str) -> None:
         # Varis SMC HTF-bias gate: READY requires agreement with the resolved
         # HTF bias (most-recent H4 BOS direction; a D1 POI must not contradict).
         # UNKNOWN bias never promotes (silence is correct). Enforced centrally
@@ -522,12 +521,18 @@ class OpportunityEngine:
                                    f"setup {opp.direction} vs HTF bias {bias['bias']}",
                                    now, result)
             return
-        # Step 2 Slice 1: the CONTINUATION stream additionally requires a sweep
-        # of an M15 IDM level (internal liquidity) after the arming BOS and at or
-        # before the promoting POI. Ordering is bias -> sweep-of-IDM; the
-        # REVERSAL stream is unaffected. A refusal does NOT terminate the
+        # Step 2 Slice 1: continuation preconditions are activated by the
+        # opportunity's OWN stream type, never by a caller-supplied flag, so a
+        # future caller cannot silently bypass them. `opportunity_type` is the
+        # authoritative discriminator (models.py:169): it is a required field and
+        # is what routes the stream in _advance_one (engine.py:360).
+        #   * REVERSAL      -> bias-only (unchanged);
+        #   * CONTINUATION  -> also requires a sweep of an M15 IDM level;
+        #   * anything else -> fail closed (never promote an unrecognised stream).
+        # Ordering is bias -> sweep-of-IDM. A refusal does NOT terminate the
         # opportunity — it stays in its current non-READY state, blocked.
-        if continuation:
+        otype = opp.opportunity_type
+        if otype == Ty.CONTINUATION.value:
             bos_time = opp.bos_time or (opp.bos_evidence or {}).get("time")
             evidence = evaluator.sweep_of_idm(
                 view, Direction(opp.direction), bos_time,
@@ -541,6 +546,12 @@ class OpportunityEngine:
                 return
             opp.idm_sweep_time = _iso(evidence["sweep_time"])
             opp.idm_sweep_reference = evidence["sweep_id"]
+        elif otype != Ty.REVERSAL.value:
+            # Unrecognised opportunity stream: fail closed rather than allow.
+            opp.blocker = BlockReason.STRUCTURAL_INVALIDATION.value
+            opp.next_expected = "recognised opportunity stream"
+            self.repo.upsert(opp)
+            return
         if opp.state != St.READY_FOR_MITIGATION.value:
             self._transition(opp, St.READY_FOR_MITIGATION,
                              BlockReason.READY_FOR_MITIGATION.value, reason, now, result,
