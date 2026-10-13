@@ -19,10 +19,10 @@ from src.smc_engine.web.hub import DictSource, EngineHub, TIMEFRAMES
 from tests.test_integration_fixture import build_fixture
 
 
-def make_setup(sid="SETUP-API-TEST"):
+def make_setup(sid="SETUP-API-TEST", symbol="TEST"):
     return TradeSetup(
-        id=sid, symbol="TEST", direction=Direction.BULLISH,
-        created_time=pd.Timestamp("2026-01-01", tz="UTC"),
+        id=sid, symbol=symbol, direction=Direction.BULLISH,
+        created_time=pd.Timestamp.now(tz="UTC"),
         poi_id="P", sweep_id="S", csd_id="C", protected_level=94.0,
         order_block_id="O", inducement_id="I", entry=100.0, stop_loss=94.0,
         take_profit=112.0, irl_swing_id="R", invalidation_level=94.0, risk_percent=1.0,

@@ -287,26 +287,41 @@ def test_timeout_is_uncertain_and_not_retried(tmp_path, monkeypatch):
 
 
 def test_post_send_parse_error_is_not_retried(tmp_path, monkeypatch):
-    """A 2xx with an unparseable body means the message was accepted."""
+    """A 2xx with an unparseable body means the message was accepted.
+
+    The accept/retry decision lives in the extracted parser, so it is verified
+    directly (no HTTP, transport not stubbed, isolation guard untouched)."""
+    from src.smc_engine.telegram import _parse_send_response
+
+    # Unparseable body from a 2xx = accepted; must not look like a failure.
+    assert _parse_send_response(b"<html>not json</html>") == {
+        "ok": True, "body_unparsed": True}
+
+    # A normal JSON body is returned verbatim.
+    parsed = _parse_send_response(b'{"ok": true, "result": {"message_id": 7}}')
+    assert parsed["result"]["message_id"] == 7
+
+
+def test_send_is_refused_under_pytest(monkeypatch):
+    """Defense-in-depth: the transport must refuse to touch the network while a
+    test runner is active, so a mis-isolated test can never send a real message."""
     import urllib.request
 
-    class _Resp:
-        def __enter__(self): return self
-        def __exit__(self, *a): return False
-        def read(self): return b"<html>not json</html>"
+    calls: list = []
 
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _Resp())
-    (tmp_path / "telegram.txt").write_text('Token="T";\nChatID="1";\n', encoding="utf-8")
-    n = TelegramNotifier(str(tmp_path / "telegram.txt"), min_send_interval=0.0)
-    try:
-        n.notify({"kind": "READY", "symbol": "EURUSD", "opportunity_id": "p1",
-                  "event_id": "e"}, None)
-        n._queue.join()
-        d = n.diagnostics()
-        assert d["telegram_send_count"] == 1
-        assert d["telegram_failure_count"] == 0
-    finally:
-        n.stop()
+    def _recording_urlopen(*args, **kwargs):
+        calls.append(args)
+        raise AssertionError("urlopen must never be reached while pytest is running")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _recording_urlopen)
+    monkeypatch.setenv(
+        "PYTEST_CURRENT_TEST",
+        "tests/test_telegram_delivery.py::test_send_is_refused_under_pytest")
+
+    with pytest.raises(RuntimeError):
+        tg_mod._send_telegram_message("TOKEN", "CHAT", "hello")
+
+    assert calls == [], "no HTTP request may be attempted while pytest is running"
 
 
 def test_failed_event_does_not_block_unrelated(tmp_path, monkeypatch):

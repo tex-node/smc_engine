@@ -164,7 +164,7 @@ def test_cursor_pagination(hist):
 def _canonical_registered_setup(sid=CANON_ID, symbol="EURAUD"):
     return TradeSetup(
         id=sid, symbol=symbol, direction=Direction.BULLISH,
-        created_time=pd.Timestamp("2026-01-01T10:00:00", tz="UTC"),
+        created_time=pd.Timestamp.now(tz="UTC"),
         poi_id="P", sweep_id="S", csd_id="C", protected_level=94.0,
         order_block_id="OB-M15-391-BULLISH", inducement_id="I",
         entry=100.0, stop_loss=94.0, take_profit=112.0, irl_swing_id="R",

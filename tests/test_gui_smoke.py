@@ -18,7 +18,7 @@ def test_gui_smoke(tmp_path):
     import pytest
     pytest.importorskip("MetaTrader5")
     src = FakeDemoSource()
-    base = pd.Timestamp("2026-01-01", tz="UTC")
+    base = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=1)
     rows = [[base + pd.Timedelta(hours=i), 100, 101, 99, 100] for i in range(60)]
     df = pd.DataFrame(rows, columns=["time", "open", "high", "low", "close"])
     src.prime("TEST", TIMEFRAMES["D1"], df)

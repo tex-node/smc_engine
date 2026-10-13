@@ -41,8 +41,10 @@ def _primed_hub(tmp_path):
 
 
 def _make_three_setups():
+    # Distinct symbols: /api/setups applies D2 latest-per-symbol retention, so
+    # three same-symbol setups would collapse to one and defeat the assertions.
     return [
-        make_setup(f"SETUP-CADJPY-REG-00{i}")
+        make_setup(f"SETUP-CADJPY-REG-00{i}", symbol=f"TEST-{chr(64 + i)}")
         for i in range(1, 4)
     ]
 

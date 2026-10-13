@@ -19,6 +19,7 @@ import os
 import queue
 import random
 import socket
+import sys
 import threading
 import time
 import urllib.error
@@ -188,6 +189,33 @@ def _format_message(kind: str, symbol: str, opp: Optional[object]) -> str:
     return "\n\n".join([f"SMC {kind}", header])
 
 
+def _is_test_runner_active() -> bool:
+    """True when a pytest session is running (test-isolation guard).
+
+    Detects pytest either via its per-test environment marker or its presence in
+    ``sys.modules`` (covers collection/import-time execution).
+    """
+    return bool(os.environ.get("PYTEST_CURRENT_TEST")) or "pytest" in sys.modules
+
+
+def _parse_send_response(body: bytes) -> dict:
+    """Interpret the raw body of a Telegram sendMessage 2xx response.
+
+    A 2xx response means Telegram ACCEPTED the message. The success body is
+    normally JSON; an unparseable body must NOT be treated as a failure, since
+    retrying would deliver the same message twice, so it is reported as
+    delivered (``{"ok": True, "body_unparsed": True}``).
+
+    Parsing is deliberately separated from the transport so the accept/retry
+    decision can be exercised without any HTTP (and without weakening the
+    test-runner isolation guard in ``_send_telegram_message``).
+    """
+    try:
+        return json.loads(body)
+    except (TypeError, ValueError):
+        return {"ok": True, "body_unparsed": True}
+
+
 def _send_telegram_message(token: str, chat_id: str, text: str,
                            timeout: float = _SEND_TIMEOUT_S) -> dict:
     """Low-level Telegram sendMessage API call.
@@ -195,7 +223,16 @@ def _send_telegram_message(token: str, chat_id: str, text: str,
     The token appears only in the URL, never in logs or error messages.
     Raises urllib.error.HTTPError on non-2xx responses so the caller can
     extract retry_after from a 429 body.
+
+    Defense-in-depth: this is the ONLY place that touches the network, so it
+    refuses to send while a test runner is active. A mis-isolated test must
+    never be able to deliver a real message; tests observe sends by stubbing the
+    transport (monkeypatching this function), not by reaching the network.
     """
+    if _is_test_runner_active():
+        raise RuntimeError(
+            "Telegram send refused: a test runner is active (isolation guard); "
+            "stub _send_telegram_message instead of performing a real send")
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = json.dumps({"chat_id": chat_id, "text": text}).encode("utf-8")
     req = urllib.request.Request(
@@ -204,13 +241,7 @@ def _send_telegram_message(token: str, chat_id: str, text: str,
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         body = resp.read()
-    try:
-        return json.loads(body)
-    except (TypeError, ValueError):
-        # A 2xx response means Telegram ACCEPTED the message. An unparseable
-        # body must NOT be treated as a failure: retrying here would deliver
-        # the same message twice.
-        return {"ok": True, "body_unparsed": True}
+    return _parse_send_response(body)
 
 
 class TelegramNotifier:

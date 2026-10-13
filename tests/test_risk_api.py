@@ -29,7 +29,7 @@ SID = "SETUP-TEST-149-OB-M15-391-BULLISH"     # canonical-shape TEST FIXTURE
 def setup(entry=100.0, stop=94.0, tp=112.0, sid=SID, created=None):
     return TradeSetup(
         id=sid, symbol="TEST", direction=Direction.BULLISH,
-        created_time=created or pd.Timestamp("2026-01-01", tz="UTC"),
+        created_time=created or pd.Timestamp.now(tz="UTC"),
         poi_id="P", sweep_id="S", csd_id="C", protected_level=stop,
         order_block_id="OB-M15-391-BULLISH", inducement_id="I",
         entry=entry, stop_loss=stop, take_profit=tp, irl_swing_id="R",
@@ -149,10 +149,14 @@ def _bars(rows, base=None):
 def test_triggered_entry_trade_consumes_execution_ready(tmp_path):
     src = FakeDemoSource()
     client, hub = build_client(tmp_path, src)
-    hub.register_setup(setup())
-    # bar 0 = creation bar; bar 2 trades down through the 100.0 entry
+    hub.stop_poller()   # stop the scan so the test's setup is the only TEST setup
+    s = setup()
+    hub.register_setup(s)
+    # The evaluator ignores candles at or before created_time, so anchor the
+    # bars to creation: bar 0 is the creation candle.
     m15 = _bars([(100, 100.5, 99.9, 100.2), (100.2, 100.3, 100.05, 100.1),
-                 (100.1, 100.15, 99.4, 99.5), (99.5, 99.6, 99.3, 99.4)])
+                 (100.1, 100.15, 99.4, 99.5), (99.5, 99.6, 99.3, 99.4)],
+                base=pd.Timestamp(s.created_time))
     hub._apply_lifecycle_evaluation(SID, m15)
     row = hub.lifecycle("TEST")[0]
     assert row["state"] == "FILLED"            # entry traded -> not executable
@@ -164,10 +168,14 @@ def test_triggered_entry_trade_consumes_execution_ready(tmp_path):
 def test_ambiguous_candle_is_never_left_executable(tmp_path):
     src = FakeDemoSource()
     client, hub = build_client(tmp_path, src)
-    hub.register_setup(setup())
-    # bar1 touches both entry (100) and invalidation (94): AMBIGUOUS
+    hub.stop_poller()   # stop the scan so the test's setup is the only TEST setup
+    s = setup()
+    hub.register_setup(s)
+    # bar1 touches both entry (100) and invalidation (94): AMBIGUOUS.
+    # Bars are anchored to creation (bar 0 = creation candle, excluded).
     m15 = _bars([(100.5, 100.6, 99.9, 100.4), (100.2, 100.8, 93.5, 95.0),
-                 (95.0, 95.4, 94.9, 95.2)])
+                 (95.0, 95.4, 94.9, 95.2)],
+                base=pd.Timestamp(s.created_time))
     hub._apply_lifecycle_evaluation(SID, m15)
     row = hub.lifecycle("TEST")[0]
     assert row["state"] == "ENTRY_NO_LONGER_VALID"

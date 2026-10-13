@@ -11,7 +11,7 @@ def frame(rows):
 
 
 def build_fixture():
-    base = pd.Timestamp("2026-01-01", tz="UTC")
+    base = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=1)
     # The fixture is deliberately constructed as a deterministic integration
     # specimen. It is not intended to model market statistics.
     d1 = frame([[base + pd.Timedelta(days=i), 100, 101, 99, 100] for i in range(20)])

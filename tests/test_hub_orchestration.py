@@ -56,7 +56,7 @@ def test_cross_symbol_lifecycle_isolated(tmp_path):
     hub.register_setup(make_setup("SET-AUD"))
     other = TradeSetup(
         id="SET-XAU", symbol="XAUUSD", direction=Direction.BEARISH,
-        created_time=pd.Timestamp("2026-01-01", tz="UTC"), poi_id="P", sweep_id="S",
+        created_time=pd.Timestamp.now(tz="UTC"), poi_id="P", sweep_id="S",
         csd_id="C", protected_level=2700.0, order_block_id="O", inducement_id="I",
         entry=2650.0, stop_loss=2700.0, take_profit=2550.0, irl_swing_id="R",
         invalidation_level=2700.0, risk_percent=1.0)

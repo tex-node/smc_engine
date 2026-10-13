@@ -415,6 +415,9 @@ class EngineHub:
         self._poller: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._history_failures = 0
+        # Rehydrate the in-memory setup registry from the persisted setups
+        # table so /api/setups survives a restart (owner D3; retention D2).
+        self._rehydrate_setup_registry()
         # ---------- opportunity layer (non-executing; UI-independent) ----------
         self.funnel = FunnelRepository(db_path)
         self.opportunities = OpportunityEngine(OpportunityRepository(db_path),
@@ -1026,6 +1029,28 @@ class EngineHub:
                                f"{setup.direction.value} setup {setup.id} became EXECUTION_READY")
             self.events.publish("SETUP_CREATED", {"setup": _setup_dict(setup)})
 
+    def _rehydrate_setup_registry(self) -> None:
+        """Load EVERY persisted setup into the in-memory registry on startup so
+        /api/setups and readiness survive a restart (owner D3).
+
+        The registry is the full audit set: retention is a read-time VIEW
+        concern (see setups_view) and is deliberately NOT applied here.
+        Read-only w.r.t. the DB."""
+        try:
+            rows = self.store.all_setups()
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception("setup registry rehydration failed")
+            return
+        for row in rows:
+            try:
+                setup = SetupStore.setup_from_json(row["setup_json"])
+            except Exception:
+                continue
+            if self.registry.get(setup.id) is None:
+                self.registry.add(SetupLifecycle(setup))
+                self.registered_ids.add(setup.id)
+
     def watch(self, symbol: str) -> None:
         with self._lock:
             if any(norm_symbol(w) == norm_symbol(symbol) for w in self.watchlist):
@@ -1046,10 +1071,18 @@ class EngineHub:
         "BROKER_REJECTED": "INVALIDATED",
     }
 
+    SETUP_RETENTION_DAYS = 3
+
     def lifecycle(self, symbol: Optional[str] = None) -> list[dict]:
         """Registered setups. `symbol` filters at this orchestration boundary:
         an EURUSD view can never surface an XAUUSD setup, and broker-suffixed
-        names still match their base symbol."""
+        names still match their base symbol.
+
+        This returns EVERY registered setup (deterministic ordering by
+        setup_id). Retention is a read-time VIEW concern and is applied only by
+        setups_view(); internal consumers such as readiness() and the registry
+        itself legitimately need the full set.
+        """
         want = norm_symbol(symbol) if symbol else None
         rows = []
         with self._lock:
@@ -1084,6 +1117,37 @@ class EngineHub:
                     },
                 })
         return rows
+
+    @staticmethod
+    def _setup_created_ts(row: dict) -> pd.Timestamp:
+        ts = pd.Timestamp(row["as_of"])
+        return ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+
+    def setups_view(self, symbol: Optional[str] = None) -> list[dict]:
+        """The /api/setups view: lifecycle() with owner-D2 retention applied.
+
+        Retention is a read-time VIEW concern (the DB and the in-memory registry
+        keep every setup): at most ONE setup per normalized symbol is shown — the
+        most recent by (created_time, setup_id) — and any setup older than
+        now() - SETUP_RETENTION_DAYS is dropped. Ordering is deterministic: the
+        most recent setup first (created_time DESC, then setup_id ASC). Same
+        dict shape as lifecycle().
+        """
+        rows = self.lifecycle(symbol)
+        now = pd.Timestamp.now(tz="UTC")
+        cutoff = now - pd.Timedelta(days=self.SETUP_RETENTION_DAYS)
+        latest: dict = {}
+        for row in rows:
+            key = norm_symbol(row["symbol"])
+            cur = latest.get(key)
+            if cur is None or (self._setup_created_ts(row), row["setup_id"]) > \
+                    (self._setup_created_ts(cur), cur["setup_id"]):
+                latest[key] = row
+        kept = [r for r in latest.values()
+                if self._setup_created_ts(r) >= cutoff]
+        kept.sort(key=lambda r: r["setup_id"])               # secondary: ASC
+        kept.sort(key=self._setup_created_ts, reverse=True)  # primary: created DESC
+        return kept
 
     def _transition(self, sid: str, to, reason: str) -> bool:
         """Canonical, idempotent transition. Duplicate target states publish
@@ -1517,7 +1581,14 @@ class EngineHub:
         return opp_evaluator.build_view(symbol, d1, h4, m15, None, MultiTimeframeConfig())
 
     def _trace_funnel(self, symbol: str) -> list:
-        """Run trace_chain() for symbol and return the emitted FunnelEvents."""
+        """Run trace_chain() for symbol, register any built setups, and return
+        the emitted FunnelEvents.
+
+        The background scan reaches the causal chain through this path; calling
+        register_setup here is what persists EXECUTION_READY setups so that
+        /api/setups is populated by the background scan (Fix A). causal.py stays
+        persistence-free — it only surfaces the built setups.
+        """
         d1 = self.bars(symbol, "D1", 150)
         h4 = self.bars(symbol, "H4", 400)
         m15 = self.bars(symbol, "M15", 500)
@@ -1526,6 +1597,13 @@ class EngineHub:
         if len(d1) < 5 or len(h4) < 10 or len(m15) < 10:
             return []
         prov = CausalMTFAnalyzer(symbol, MultiTimeframeConfig()).trace_chain(d1, h4, m15)
+        for setup in getattr(prov, "ready_setups", []):
+            try:
+                self.register_setup(setup)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception(
+                    "failed to register setup %s from background scan", setup.id)
         return prov.funnel_events
 
     def _dispatch_opportunity_events(self, res: dict) -> None:

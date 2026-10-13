@@ -103,6 +103,7 @@ class CausalProvenance:
     rejection_reason: str = "no active D1 POI at any sweep time"
     rr_gate: str = ""
     funnel_events: list = field(default_factory=list)  # list[FunnelEvent]
+    ready_setups: list = field(default_factory=list)   # list[TradeSetup] built at READY
 
 
 class CausalMTFAnalyzer:
@@ -439,13 +440,18 @@ class CausalMTFAnalyzer:
                             irl = irl_structural
 
                         try:
-                            build_trade_setup(
+                            setup = build_trade_setup(
                                 self.symbol, context, sweep, csd, irl,
                                 risk_percent=self.config.risk_percent, created_time=event_time,
                             )
+                            # Surface the built setup so the caller (hub) can persist it.
+                            # causal.py performs no persistence and imports no store/registry.
+                            prov.ready_setups.append(setup)
                             prov.execution_ready_count += 1
                             prov.qualified_candidate_count += 1
                             _deepen("READY", f"{prov.qualified_candidate_count} candidate(s) qualified")
+                            # EXECUTION_READY now means: a setup was BUILT and surfaced
+                            # for registration by the caller (subject to retention).
                             _emit("READY", "EXECUTION_READY", sweep, direction=poi_dir,
                                   evidence_timestamp=str(csd.candle_time))
                         except ValueError as exc:

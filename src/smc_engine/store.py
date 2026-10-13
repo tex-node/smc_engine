@@ -152,6 +152,25 @@ class SetupStore:
                  "created_time": r[3], "updated_time": r[4], "ticket": r[5], "position_ticket": r[6],
                  "setup_json": json.loads(r[7]), "reason": r[8]} for r in rows]
 
+    def all_setups(self) -> list[dict]:
+        """Every setup row (the audit trail). Read-only; used to rehydrate the
+        in-memory registry on startup. Rows whose stored state is unrecognised
+        are skipped rather than raising."""
+        rows = self._conn.execute(
+            "SELECT setup_id,symbol,state,created_time,updated_time,ticket,position_ticket,setup_json,reason "
+            "FROM setups").fetchall()
+        out = []
+        for r in rows:
+            try:
+                state = SetupState(r[2])
+            except ValueError:
+                continue
+            out.append({"setup_id": r[0], "symbol": r[1], "state": state,
+                        "created_time": r[3], "updated_time": r[4], "ticket": r[5],
+                        "position_ticket": r[6], "setup_json": json.loads(r[7]),
+                        "reason": r[8]})
+        return out
+
     def set_position_ticket(self, setup_id: str, position_ticket: int) -> None:
         with self._conn:
             updated = self._conn.execute(

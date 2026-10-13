@@ -185,7 +185,7 @@ def create_app(hub: Optional[EngineHub] = None) -> FastAPI:
     # ---------- setups / lifecycle ----------
     @app.get("/api/setups")
     def setups(symbol: Optional[str] = None):
-        return {"setups": _jsonable(H().lifecycle(symbol))}
+        return {"setups": _jsonable(H().setups_view(symbol))}
 
     @app.get("/api/setups/{setup_id}")
     def setup_detail(setup_id: str):

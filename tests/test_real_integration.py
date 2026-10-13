@@ -20,7 +20,7 @@ from src.smc_engine.setup import TradeSetup
 
 from tests.test_api import FakeDemoSource, build_client, make_setup
 
-BASE = pd.Timestamp("2026-01-01", tz="UTC")
+BASE = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=1)
 
 REAL_SETUP = TradeSetup(
     id="SET-REAL", symbol="TEST", direction=Direction.BULLISH, created_time=BASE,
