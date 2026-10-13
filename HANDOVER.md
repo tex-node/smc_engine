@@ -54,7 +54,7 @@ af5c4fe fix: add auditable opportunity quarantine safeguards
   - `C:\smc_engine\smc_engine_state.sqlite3` — setups + lifecycle events.
 - **Launcher / stop:**
   - `start_workstation.bat` → `tools/load_mt5_credentials.ps1` (starts uvicorn in a titled cmd console, opens the browser).
-  - `stop_workstation.bat` → `taskkill /FI "WINDOWTITLE eq SMC Engine Workstation Server*" /T`. **In practice this matched nothing and did not stop the server.** Escalate: find the launcher `cmd.exe` (parent of the `.venv` python) and `taskkill /PID <cmdPid> /T /F` after verifying ownership. Tree shape: `cmd.exe (launcher) → .venv python → system python (uvicorn listener)`.
+  - `stop_workstation.bat` → `tools/stop_workstation.ps1`. Stops by **port ownership**, not window title: find the PID listening on `127.0.0.1:8765` (`Get-NetTCPConnection`, `netstat` fallback), walk `ParentProcessId` up (≤5 hops) to the launcher `cmd.exe`, then `taskkill /PID <cmdPid> /T /F` kills the whole tree; finally poll until the port frees. Idempotent (prints "not running" and exits 0 when nothing owns the port). **Runtime tree shape:** `cmd.exe (launcher) → .venv python → system python (uvicorn listener, owns 8765)`. Do **not** stop by window title: `taskkill /FI "WINDOWTITLE eq SMC Engine Workstation Server*"` matches nothing because the title drifts once uvicorn writes to the console and the window may be owned by Windows Terminal — this failed in two separate sessions.
 
 ---
 
